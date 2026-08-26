@@ -1,0 +1,23 @@
+# External reference clones - cloned, not vendored
+reference/
+
+# Build output
+out/
+build/
+_build/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Tooling / session artifacts
+.rstk/
+**/.sf/
+**/.sfdx/
+**/node_modules/
+vcpkg_installed/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
