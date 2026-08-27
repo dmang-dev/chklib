@@ -3,9 +3,10 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: early but usable.** The section container, typed views and `chkdiff inspect`
-are implemented, with round-trip and determinism gates green across a 65-map corpus.
-`chkdiff diff` and MPQ reading are next.
+**Status: early but usable.** The section container, typed views, `chkdiff inspect` and
+`chkdiff diff` are implemented, with round-trip and determinism gates green across a
+65-map corpus. MPQ reading is next, and is what stands between this and the git
+integration.
 
 ## Why
 
@@ -137,6 +138,59 @@ Nothing is invented: unit and sprite types print as numbers, because naming them
 **MPQ archives are not supported yet.** `chkdiff` reads a bare `scenario.chk`; pointing it
 at a `.scm`/`.scx` gives a message explaining how to extract one. That gap has to close
 before the git integration is actually useful, since maps in a repository are archives.
+
+## `chkdiff diff`
+
+Compares two scenarios by meaning rather than by bytes. Exit status follows `diff(1)`:
+0 when identical, 1 when they differ.
+
+```bash
+chkdiff diff a.chk b.chk
+chkdiff diff --json a.chk b.chk
+```
+
+```
+~ map  name
+    - #1 "Z6) The Dark Templar"
+    + #1 "Z8) The Dark Templar"
+~ players  p6 race
+    - 2 Protoss
+    + 0 Zerg
+~ forces  force2 members
+    - p2,p3
+    + p2
+```
+
+A byte diff can't do this — inserting one string shifts every offset after it, and one
+new trigger moves 2400 bytes of everything downstream. So each section is compared using
+whatever notion of identity it actually has:
+
+| Kind | Sections | How |
+|---|---|---|
+| Identity by index | strings, locations | position by position — ids are referenced from elsewhere in the map |
+| No identity | units, sprites | multiset, then pair leftovers by `(owner, type)` so a move reads as a change |
+| Content **and** position | triggers | LCS alignment over content hashes |
+
+Triggers are the hard case: no ids, but their order *is* execution order, so they can't
+be treated as a set either. A positional comparison reports every later trigger as
+modified the moment you insert one at the top.
+
+The fix is an LCS alignment (`difflib.SequenceMatcher`) over per-trigger content hashes,
+with survivors inside each replace-block paired greedily by similarity. Inserting a
+trigger at position 0 of a 20-trigger map reports **one addition**. Insert one *and* edit
+a later one, and you get:
+
+```
++ TRIG  trigger 0
+    + owners=[18] | flags=0 | if Bring(...) | do CreateUnit(...)
+~ TRIG  trigger 6->7
+    - do RemoveUnit(group=17, type=101, flags=0x14)
+    + do RemoveUnit(group=17, time=12345, type=101, flags=0x14)
+```
+
+The `6->7` records that the trigger both moved and changed. It degrades gracefully: below
+the similarity threshold a replacement is reported as an add plus a remove, which is
+correct, just less informative.
 
 ## Development
 

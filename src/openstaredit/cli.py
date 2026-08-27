@@ -1,16 +1,18 @@
 """``chkdiff`` -- command line entry point.
 
-Currently implements ``inspect``. ``diff`` is the next milestone.
+Implements ``inspect`` and ``diff``.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 
 from . import __version__
 from .chk import Chk
+from .diff import diff
 from .inspect import FORMAT_VERSION, render
 
 __all__ = ["main"]
@@ -59,6 +61,17 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_diff(args: argparse.Namespace) -> int:
+    left, right = pathlib.Path(args.a), pathlib.Path(args.b)
+    for path in (left, right):
+        if not path.is_file():
+            raise SystemExit(f"not a file: {path}")
+    report = diff(_load(left), _load(right))
+    sys.stdout.write(report.to_json() if args.json else report.to_text())
+    # Exit codes follow diff(1): 0 identical, 1 differences found.
+    return 0 if report.is_empty else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chkdiff",
@@ -88,12 +101,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit non-zero if the file has parse errors",
     )
     inspect.set_defaults(func=_cmd_inspect)
+
+    compare = sub.add_parser(
+        "diff",
+        help="compare two scenarios semantically",
+        description=(
+            "Compare two scenario.chk files by meaning rather than by bytes. "
+            "Exit status follows diff(1): 0 when identical, 1 when they differ."
+        ),
+    )
+    compare.add_argument("a", help="path to the first scenario.chk")
+    compare.add_argument("b", help="path to the second scenario.chk")
+    compare.add_argument(
+        "--json", action="store_true",
+        help="emit machine-readable JSON instead of text",
+    )
+    compare.set_defaults(func=_cmd_diff)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except BrokenPipeError:
+        # A downstream consumer closed the pipe -- `chkdiff diff x y | head` is
+        # completely normal usage. Python would otherwise flush stdout again at
+        # shutdown and print a second traceback to stderr, so point the fd at
+        # devnull first. 128 + SIGPIPE(13) is the conventional status.
+        devnull = None
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except (OSError, AttributeError, ValueError):
+            # stdout may not be a real file (a test double, or already closed).
+            # There is nothing useful left to do, and raising here would defeat
+            # the purpose of catching BrokenPipeError in the first place.
+            if devnull is not None:
+                os.close(devnull)
+        return 141
 
 
 if __name__ == "__main__":  # pragma: no cover

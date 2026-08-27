@@ -267,3 +267,50 @@ def test_editing_one_unit_produces_a_local_diff() -> None:
         if line[:1] in "+-" and not line.startswith(("+++", "---"))
     ]
     assert len(changed) == 2, f"expected one line replaced, got {changed}"
+
+
+# --------------------------------------------------------------------------
+# Semantic diff over real maps
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", MAPS, ids=IDS)
+def test_map_diffed_against_itself_is_empty(path: pathlib.Path) -> None:
+    """The most basic correctness check a differ can fail."""
+    from openstaredit.diff import diff
+
+    assert diff(load(path), load(path)).is_empty
+
+
+def test_diffing_two_real_maps_is_deterministic_and_non_empty() -> None:
+    from openstaredit.diff import diff
+
+    a, b = load(MAPS[0]), load(MAPS[1])
+    first, second = diff(a, b).to_text(), diff(a, b).to_text()
+    assert first == second
+    assert "no differences" not in first
+
+
+def test_inserting_a_trigger_into_a_real_map_does_not_cascade() -> None:
+    """The cascade property, on a map with real triggers rather than a fixture."""
+    import copy
+    from dataclasses import replace
+
+    from openstaredit.diff import diff
+    from openstaredit.views import view_for as _view_for
+
+    original = load(MAPS[0])
+    trig = _view_for(original, "TRIG")
+    assert len(trig) >= 10, "need a map with a real trigger list"
+
+    edited = load(MAPS[0])
+    view = _view_for(edited, "TRIG")
+    view.triggers.insert(0, copy.deepcopy(view.triggers[3]))
+    section = edited.last("TRIG")
+    chk_index = edited.sections.index(section)
+    edited.sections[chk_index] = replace(section, data=view.to_bytes())
+
+    report = diff(original, edited)
+    trigger_changes = [c for c in report.changes if c.area == "TRIG"]
+    assert len(trigger_changes) == 1, [c.to_text() for c in trigger_changes]
+    assert trigger_changes[0].kind == "added"
