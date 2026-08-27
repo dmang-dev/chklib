@@ -11,7 +11,7 @@ green. Typed views and the CLI are not built yet.
 Everything that can read a StarCraft map today is one of three things:
 
 - **read-only** — [`bw-chk`](https://github.com/ShieldBattery/bw-chk) parses `scenario.chk`
-  in JavaScript, but cannot write, and has no trigger support at all.
+  in JavaScript, triggers included, but has no writer at all and does not parse locations.
 - **a section bag** — [`eudplib`](https://github.com/armoha/eudplib) models a CHK as
   `dict[bytes, bytes]`. It collapses duplicate sections and its writer injects a junk
   `ISOM` section, so it does not round-trip.
