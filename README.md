@@ -3,9 +3,10 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: working end to end.** The section container, typed views, MPQ reading,
-`chkdiff inspect`, `chkdiff diff` and the git integration are all implemented and tested.
-`git diff` on a `.scx` shows what actually changed in the map.
+**Status: working end to end.** Container, typed views, MPQ reading *and writing*,
+`chkdiff inspect`, `chkdiff diff`, `pack`/`unpack`, and the git integration are all
+implemented and tested. `git diff` on a `.scx` shows what actually changed in the map,
+and maps can be read, edited and saved back.
 
 ## Why
 
@@ -198,10 +199,44 @@ from openstaredit.mpq import MpqArchive, SCENARIO_PATH
 chk_bytes = MpqArchive(open("(4)Blood Bath.scm", "rb").read()).read_file(SCENARIO_PATH)
 ```
 
-This is read-only and deliberately partial: MPQ v1 with encrypted hash/block tables,
-multi-sector and single-unit files, `FIX_KEY`, and the compressions maps actually use.
-MPQ v2 is **refused rather than guessed at**, because a v2 archive parsed as v1 produces
+Reading is deliberately partial: MPQ v1 with encrypted hash/block tables, multi-sector
+and single-unit files, `FIX_KEY`, and the compressions maps actually use. MPQ v2 is
+**refused rather than guessed at**, because a v2 archive parsed as v1 produces
 plausible-looking wrong bytes.
+
+### Saving
+
+```python
+from openstaredit.mpq import write_scenario
+
+open("edited.scx", "wb").write(write_scenario(chk_bytes, compress=True))
+```
+
+```bash
+chkdiff unpack "(4)Blood Bath.scm" scenario.chk
+chkdiff pack --compress scenario.chk rebuilt.scx
+```
+
+Writing produces a plainly laid out v1 archive and encrypts nothing — encryption exists
+to make files hard to extract, which buys a map editor nothing.
+
+On compression, two tools whose maps demonstrably load in StarCraft disagree, and both
+are fine: **euddraft** writes zlib (`MPQ_COMPRESSION_ZLIB`), while **sc64-maps** stores
+everything plainly. So the default is *stored* — the option nothing can refuse — and
+`--compress` opts into zlib on the strength of euddraft's production use. Writing PKWARE
+implode, what Blizzard's own maps use, would need a compressor; only the decompressor is
+implemented here.
+
+Round-tripping every installed map through the writer and back out via StormLib:
+
+| Check | Result |
+|---|---|
+| 423 maps rewritten, reopened by StormLib | **423/423 identical** |
+| 65 sc64 scenarios, stored and zlib | **65/65 identical** in both modes |
+| Size of our zlib archives vs Blizzard's | 44% |
+
+`chkdiff pack` refuses a scenario that fails to parse, since it would fail in StarCraft
+too; `--force` overrides.
 
 A permissive off-the-shelf reader wasn't an option: `mpyq` (BSD) cannot open a single
 genuine Blizzard map — it has no decryption, and no PKWARE implode, which is compression

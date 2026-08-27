@@ -1,21 +1,38 @@
-"""Reading MPQ archives -- enough of them to get ``staredit\\scenario.chk`` out.
+"""Reading and writing MPQ archives -- enough to open and save a map.
 
-A ``.scm``/``.scx`` map is an MPQ archive with the scenario inside it, so this is
-what stands between the rest of the library and real map files.
+A ``.scm``/``.scx`` map is an MPQ archive with ``staredit\\scenario.chk`` inside
+it, so this is what connects the rest of the library to real map files.
 
-This is a **read-only, deliberately partial** implementation. It covers MPQ v1
-with encrypted hash/block tables, multi-sector and single-unit files, encrypted
-file data with the ``FIX_KEY`` adjustment, and the compressions StarCraft maps
-actually use. It does not write archives, does not handle v2+ extended tables,
-and does not implement the compressions no map has ever used (ADPCM, Huffman,
-sparse) -- those raise rather than returning wrong bytes.
+**Reading** is deliberately partial: MPQ v1 with encrypted hash and block
+tables, multi-sector and single-unit files, ``FIX_KEY``, and the compressions
+StarCraft maps actually use. It does not handle v2+ extended tables, and does
+not implement compressions no map has ever used (ADPCM, Huffman, sparse) --
+those raise rather than returning wrong bytes.
+
+**Writing** produces a minimal, plainly-laid-out v1 archive: header, file data,
+hash table, block table. Nothing is encrypted on write, because encryption only
+exists to make files hard to extract and buys a map editor nothing.
+
+On write compression, two tools whose output is known to load in StarCraft
+disagree, and both are fine:
+
+- ``euddraft``/``eudplib`` -- the toolchain the production UMS scene builds with
+  -- writes **zlib** (``MPQ_COMPRESSION_ZLIB``, ``eudplib-stormlib/src/lib.rs``).
+- ``sc64-maps`` writes everything **uncompressed**, and those maps were verified
+  in-game.
+
+So :class:`MpqWriter` defaults to storing plainly, which is the option nothing
+can refuse, and ``compress=True`` opts into zlib on the strength of euddraft's
+production use. Writing PKWARE implode -- what Blizzard's own maps use -- would
+need a compressor, and only the decompressor is implemented here.
 
 Written from the published format description rather than derived from any
 existing implementation, so that this file can be MIT-licensed.
 
-Correctness is established by comparison against ground truth rather than by
-inspection: every scenario extracted here is checked byte-for-byte against the
-same file extracted by StormLib (via eudplib). See ``tests/test_mpq.py``.
+Correctness is established against ground truth rather than by inspection. Every
+scenario read here is compared byte-for-byte with StormLib's extraction of the
+same file, and every archive written here is handed back to StormLib to reopen.
+See ``tests/test_mpq.py``.
 """
 
 from __future__ import annotations
@@ -29,7 +46,8 @@ from typing import Iterator
 from .pkware import explode
 
 __all__ = [
-    "MpqArchive", "MpqError", "SCENARIO_PATH", "looks_like_mpq",
+    "MpqArchive", "MpqWriter", "MpqError", "SCENARIO_PATH", "looks_like_mpq",
+    "read_scenario", "write_scenario",
 ]
 
 SCENARIO_PATH = "staredit\\scenario.chk"
@@ -124,6 +142,30 @@ def _decrypt(data: bytes, key: int) -> bytes:
         ) & 0xFFFFFFFF
         seed2 = (value + seed2 + (seed2 << 5) + 3) & 0xFFFFFFFF
         struct.pack_into("<I", out, index * 4, value)
+    return bytes(out)
+
+
+def _encrypt(data: bytes, key: int) -> bytes:
+    """The inverse of :func:`_decrypt`.
+
+    The two differ in one place that is easy to get wrong: ``seed2`` is advanced
+    from the **plaintext** word in both directions. Decryption happens to have
+    the plaintext in hand as its result, so the update looks like it uses the
+    output; here it must explicitly use the input.
+    """
+    seed1 = key & 0xFFFFFFFF
+    seed2 = 0xEEEEEEEE
+    words = len(data) // 4
+    out = bytearray(data)
+    for index in range(words):
+        seed2 = (seed2 + _CRYPT[0x400 + (seed1 & 0xFF)]) & 0xFFFFFFFF
+        (plain,) = struct.unpack_from("<I", data, index * 4)
+        cipher = (plain ^ ((seed1 + seed2) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        seed1 = (
+            (((~seed1) & 0xFFFFFFFF) << 0x15) + 0x11111111 | (seed1 >> 0x0B)
+        ) & 0xFFFFFFFF
+        seed2 = (plain + seed2 + (seed2 << 5) + 3) & 0xFFFFFFFF
+        struct.pack_into("<I", out, index * 4, cipher)
     return bytes(out)
 
 
@@ -418,6 +460,155 @@ class MpqArchive:
     def block_flags(self) -> list[int]:
         """Flags of every block, for diagnostics."""
         return [b.flags for b in self._block_table]
+
+
+class MpqWriter:
+    """Build a small MPQ v1 archive -- enough to save a map.
+
+    The archive layout is header, then file data, then the hash table, then the
+    block table, which is what every StarCraft map uses.
+
+    Files are stored **uncompressed by default**, and that is a deliberate
+    choice rather than laziness. StarCraft 1.16.1 ships an old Storm build, and
+    which compressions it accepts is not something this project can verify
+    without launching the game. Storing plainly is accepted by every reader that
+    exists. ``compress=True`` opts into zlib per sector, which StormLib reads
+    happily but which has not been confirmed against the retail client.
+
+    Nothing is encrypted on write. Encryption exists to make files hard to pull
+    out of an archive; it buys a map editor nothing and only adds ways to
+    produce something unreadable.
+    """
+
+    #: Empty hash slots are all-ones, which is what makes ``block_index`` read
+    #: back as ``_HASH_ENTRY_EMPTY``.
+    _EMPTY_HASH_ENTRY = b"\xff" * _HASH_ENTRY_SIZE
+
+    def __init__(self, *, sector_shift: int = 3, hash_table_size: int | None = None,
+                 listfile: bool = True) -> None:
+        if not 0 <= sector_shift <= 23:
+            raise MpqError(f"sector_shift {sector_shift} is out of range")
+        self.sector_shift = sector_shift
+        self.sector_size = 512 << sector_shift
+        self._requested_hash_size = hash_table_size
+        self._listfile = listfile
+        self._files: list[tuple[str, bytes, bool]] = []
+
+    def add(self, name: str, data: bytes, *, compress: bool = False) -> None:
+        """Queue a file. ``name`` uses backslashes, as MPQ paths do."""
+        if any(existing == name for existing, _, _ in self._files):
+            raise MpqError(f"{name!r} was already added")
+        self._files.append((name, bytes(data), compress))
+
+    # -- layout ------------------------------------------------------------
+
+    def _hash_table_size(self, file_count: int) -> int:
+        """A power of two with headroom, because probing degrades when full."""
+        if self._requested_hash_size is not None:
+            size = self._requested_hash_size
+            if size < 1 or size & (size - 1):
+                raise MpqError(f"hash_table_size {size} is not a power of two")
+            if size < file_count:
+                raise MpqError(
+                    f"hash_table_size {size} cannot hold {file_count} files"
+                )
+            return size
+        size = 16
+        while size < file_count * 2:
+            size *= 2
+        return size
+
+    def _pack_file(self, data: bytes, compress: bool) -> tuple[bytes, int]:
+        """Return the stored bytes and the block flags for one file."""
+        if not compress or not data:
+            return data, FLAG_EXISTS
+
+        sectors = [
+            data[offset : offset + self.sector_size]
+            for offset in range(0, len(data), self.sector_size)
+        ]
+        packed: list[bytes] = []
+        for sector in sectors:
+            candidate = bytes((COMP_ZLIB,)) + zlib.compress(sector, 9)
+            # A sector is only stored compressed when that actually gained
+            # something; otherwise it goes in raw and the reader detects it by
+            # the stored size matching the unpacked size.
+            packed.append(candidate if len(candidate) < len(sector) else sector)
+
+        table_size = (len(sectors) + 1) * 4
+        offsets = [table_size]
+        for sector in packed:
+            offsets.append(offsets[-1] + len(sector))
+        blob = struct.pack(f"<{len(offsets)}I", *offsets) + b"".join(packed)
+        if len(blob) >= len(data):
+            # Compression made it bigger. Store plainly instead.
+            return data, FLAG_EXISTS
+        return blob, FLAG_EXISTS | FLAG_COMPRESS
+
+    def to_bytes(self) -> bytes:
+        files = list(self._files)
+        if self._listfile and files:
+            names = "\r\n".join(name for name, _, _ in files) + "\r\n"
+            files.append(("(listfile)", names.encode("ascii"), False))
+        if not files:
+            raise MpqError("an archive needs at least one file")
+
+        hash_size = self._hash_table_size(len(files))
+        header_size = _HEADER.size
+
+        # Lay the file data out immediately after the header.
+        blocks: list[tuple[int, int, int, int]] = []
+        blob = bytearray()
+        for _, data, compress in files:
+            stored, flags = self._pack_file(data, compress)
+            blocks.append((header_size + len(blob), len(stored), len(data), flags))
+            blob += stored
+
+        hash_offset = header_size + len(blob)
+        block_offset = hash_offset + hash_size * _HASH_ENTRY_SIZE
+        archive_size = block_offset + len(files) * _BLOCK_ENTRY_SIZE
+
+        hash_table = self._build_hash_table(files, hash_size)
+        block_table = b"".join(_BLOCK_ENTRY.pack(*entry) for entry in blocks)
+
+        header = _HEADER.pack(
+            MPQ_MAGIC, header_size, archive_size, 0, self.sector_shift,
+            hash_offset, block_offset, hash_size, len(files),
+        )
+        return (
+            header
+            + bytes(blob)
+            + _encrypt(hash_table, _hash("(hash table)", _HASH_FILE_KEY))
+            + _encrypt(block_table, _hash("(block table)", _HASH_FILE_KEY))
+        )
+
+    def _build_hash_table(self, files, hash_size: int) -> bytes:
+        table = bytearray(self._EMPTY_HASH_ENTRY * hash_size)
+        for block_index, (name, _, _) in enumerate(files):
+            slot = _hash(name, _HASH_TABLE_OFFSET) % hash_size
+            for step in range(hash_size):
+                probe = (slot + step) % hash_size
+                start = probe * _HASH_ENTRY_SIZE
+                if table[start : start + _HASH_ENTRY_SIZE] == self._EMPTY_HASH_ENTRY:
+                    _HASH_ENTRY.pack_into(
+                        table, start,
+                        _hash(name, _HASH_NAME_A),
+                        _hash(name, _HASH_NAME_B),
+                        0,   # locale: neutral
+                        0,   # platform
+                        block_index,
+                    )
+                    break
+            else:  # pragma: no cover - guarded by _hash_table_size
+                raise MpqError("hash table is full")
+        return bytes(table)
+
+
+def write_scenario(chk: bytes, *, compress: bool = False, **kwargs) -> bytes:
+    """Build a map archive containing ``chk`` as ``staredit\\scenario.chk``."""
+    writer = MpqWriter(**kwargs)
+    writer.add(SCENARIO_PATH, chk, compress=compress)
+    return writer.to_bytes()
 
 
 def read_scenario(raw: bytes) -> bytes:

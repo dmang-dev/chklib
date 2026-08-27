@@ -286,3 +286,205 @@ def test_pkware_path_is_actually_exercised() -> None:
     finally:
         mpq.explode = real
     assert calls > 0, "no PKWARE sector decompressed - the gate proves nothing about it"
+
+
+# --------------------------------------------------------------------------
+# Writing
+# --------------------------------------------------------------------------
+
+
+def test_encrypt_inverts_decrypt() -> None:
+    """The two directions differ in one place; a property test is the cheapest
+    way to be sure that place is right."""
+    import os
+
+    for trial in range(200):
+        data = os.urandom((trial % 30) * 4)
+        key = mpq._hash(f"file{trial}.dat", mpq._HASH_FILE_KEY)
+        assert mpq._decrypt(mpq._encrypt(data, key), key) == data
+
+
+def test_encrypt_actually_changes_the_bytes() -> None:
+    data = bytes(range(64))
+    key = mpq._hash("(hash table)", mpq._HASH_FILE_KEY)
+    assert mpq._encrypt(data, key) != data
+
+
+@pytest.mark.parametrize("compress", [False, True], ids=["stored", "zlib"])
+def test_write_then_read_round_trip(compress: bool) -> None:
+    payload = b"scenario bytes " * 500
+    archive = mpq.write_scenario(payload, compress=compress)
+    assert looks_like_mpq(archive)
+    assert MpqArchive(archive).read_file(SCENARIO_PATH) == payload
+
+
+def test_written_archive_reports_v1() -> None:
+    archive = MpqArchive(mpq.write_scenario(b"x" * 100))
+    assert archive.format_version == 0
+    assert archive.block_count >= 1
+
+
+def test_writer_rejects_a_duplicate_name() -> None:
+    writer = mpq.MpqWriter()
+    writer.add("a\b.txt", b"one")
+    with pytest.raises(MpqError, match="already added"):
+        writer.add("a\b.txt", b"two")
+
+
+def test_writer_rejects_an_empty_archive() -> None:
+    with pytest.raises(MpqError, match="at least one file"):
+        mpq.MpqWriter().to_bytes()
+
+
+def test_writer_rejects_a_non_power_of_two_hash_table() -> None:
+    """Real MPQ readers mask with size-1, so a non-power-of-two breaks them."""
+    writer = mpq.MpqWriter(hash_table_size=100)
+    writer.add("a.txt", b"x")
+    with pytest.raises(MpqError, match="power of two"):
+        writer.to_bytes()
+
+
+def test_writer_rejects_a_hash_table_that_cannot_hold_the_files() -> None:
+    writer = mpq.MpqWriter(hash_table_size=1, listfile=False)
+    for index in range(4):
+        writer.add(f"f{index}.txt", b"x")
+    with pytest.raises(MpqError, match="cannot hold"):
+        writer.to_bytes()
+
+
+def test_multiple_files_round_trip() -> None:
+    writer = mpq.MpqWriter()
+    # Real MPQ paths use backslashes; a raw string keeps this a separator
+    # rather than an escape.
+    contents = {rf"dir\file{i}.dat": bytes([i]) * (i * 100 + 1) for i in range(8)}
+    for index, (name, data) in enumerate(contents.items()):
+        # Mix stored and compressed files inside one archive.
+        writer.add(name, data, compress=bool(index % 2))
+    archive = MpqArchive(writer.to_bytes())
+    for name, data in contents.items():
+        assert archive.read_file(name) == data, name
+
+
+def test_listfile_is_written_and_lists_every_file() -> None:
+    writer = mpq.MpqWriter()
+    writer.add("one.txt", b"1")
+    writer.add("two.txt", b"2")
+    archive = MpqArchive(writer.to_bytes())
+    listing = archive.read_file("(listfile)").decode("ascii").split()
+    assert set(listing) == {"one.txt", "two.txt"}
+
+
+def test_listfile_can_be_suppressed() -> None:
+    writer = mpq.MpqWriter(listfile=False)
+    writer.add("one.txt", b"1")
+    archive = MpqArchive(writer.to_bytes())
+    assert "(listfile)" not in archive
+
+
+def test_empty_file_round_trips() -> None:
+    writer = mpq.MpqWriter()
+    writer.add("empty.dat", b"")
+    assert MpqArchive(writer.to_bytes()).read_file("empty.dat") == b""
+
+
+def test_incompressible_data_falls_back_to_storing() -> None:
+    """Compression that makes a file bigger must not be used."""
+    import os
+
+    noise = os.urandom(20000)
+    archive = mpq.write_scenario(noise, compress=True)
+    assert MpqArchive(archive).read_file(SCENARIO_PATH) == noise
+
+
+def test_compression_actually_shrinks_compressible_data() -> None:
+    payload = b"aaaabbbb" * 8000
+    stored = mpq.write_scenario(payload, compress=False)
+    packed = mpq.write_scenario(payload, compress=True)
+    assert len(packed) < len(stored) // 4
+
+
+@pytest.mark.skipif(not _PAIRS, reason="no extracted fixtures available")
+@pytest.mark.parametrize("compress", [False, True], ids=["stored", "zlib"])
+def test_stormlib_can_open_what_we_write(tmp_path: pathlib.Path, compress: bool) -> None:
+    """The check that matters: an independent implementation reopens our output.
+
+    Our own reader agreeing with our own writer would prove nothing.
+    """
+    pytest.importorskip("eudplib")
+    from eudplib.bindings._rust import mpqapi
+
+    for index, (_, fixture) in enumerate(_PAIRS[:12]):
+        chk = fixture.read_bytes()
+        target = tmp_path / f"map{index}.scx"
+        target.write_bytes(mpq.write_scenario(chk, compress=compress))
+        assert mpqapi.MPQ.open(str(target)).extract_file(SCENARIO_PATH) == chk
+
+
+@pytest.mark.skipif(not SC_MAPS, reason="no StarCraft installation found")
+def test_every_installed_map_survives_a_rewrite(tmp_path: pathlib.Path) -> None:
+    """Extract every real map, rewrite it, and have StormLib reopen the result."""
+    pytest.importorskip("eudplib")
+    from eudplib.bindings._rust import mpqapi
+
+    checked = 0
+    problems: list[str] = []
+    for index, path in enumerate(SC_MAPS):
+        try:
+            chk = MpqArchive(pathlib.Path(path).read_bytes()).read_file(SCENARIO_PATH)
+        except MpqError:
+            continue
+        target = tmp_path / f"m{index}.scx"
+        target.write_bytes(mpq.write_scenario(chk, compress=True))
+        if mpqapi.MPQ.open(str(target)).extract_file(SCENARIO_PATH) != chk:
+            problems.append(pathlib.Path(path).name)
+        checked += 1
+    assert checked >= 100, f"only {checked} maps rewritten"
+    assert not problems, f"{len(problems)} rewrites differ: {problems[:10]}"
+
+
+def test_pack_unpack_cli_round_trip(tmp_path: pathlib.Path, capsys) -> None:
+    """The user-facing path: unpack a map, pack it back, read it again."""
+    from openstaredit.cli import main
+
+    if not _PAIRS:
+        pytest.skip("no fixtures available")
+    source = _PAIRS[0][0]
+    chk_out = tmp_path / "scenario.chk"
+    map_out = tmp_path / "rebuilt.scx"
+
+    assert main(["unpack", source, str(chk_out)]) == 0
+    assert main(["pack", str(chk_out), str(map_out)]) == 0
+    capsys.readouterr()
+
+    original = MpqArchive(pathlib.Path(source).read_bytes()).read_file(SCENARIO_PATH)
+    assert MpqArchive(map_out.read_bytes()).read_file(SCENARIO_PATH) == original
+
+
+def test_pack_refuses_a_broken_scenario(tmp_path: pathlib.Path, capsys) -> None:
+    """A scenario that cannot be parsed would fail in StarCraft too."""
+    from openstaredit.cli import main
+
+    bad = tmp_path / "bad.chk"
+    bad.write_bytes(b"MTXM" + struct.pack("<i", 0x7FFFFFFF) + b"ab")
+    with pytest.raises(SystemExit, match="parse errors"):
+        main(["pack", str(bad), str(tmp_path / "out.scx")])
+    # ...but --force is an explicit escape hatch.
+    assert main(["pack", "--force", str(bad), str(tmp_path / "out.scx")]) == 0
+
+
+def test_pack_rejects_an_archive_as_input(tmp_path: pathlib.Path) -> None:
+    from openstaredit.cli import main
+
+    already = tmp_path / "map.scx"
+    already.write_bytes(mpq.write_scenario(b"x" * 64))
+    with pytest.raises(SystemExit, match="already an archive"):
+        main(["pack", str(already), str(tmp_path / "out.scx")])
+
+
+def test_unpack_rejects_a_bare_chk(tmp_path: pathlib.Path) -> None:
+    from openstaredit.cli import main
+
+    plain = tmp_path / "scenario.chk"
+    plain.write_bytes(b"VER " + struct.pack("<i", 2) + b"\x3b\x00")
+    with pytest.raises(SystemExit, match="not an MPQ archive"):
+        main(["unpack", str(plain), str(tmp_path / "out.chk")])

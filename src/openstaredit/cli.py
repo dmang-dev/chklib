@@ -1,6 +1,8 @@
 """``chkdiff`` -- command line entry point.
 
-Implements ``inspect`` and ``diff``.
+``inspect`` and ``diff`` are the tools; ``pack`` and ``unpack`` move a scenario
+in and out of a map archive; ``textconv`` and ``install-textconv`` wire the whole
+thing into ``git diff``.
 """
 
 from __future__ import annotations
@@ -14,9 +16,16 @@ from . import __version__
 from .chk import Chk
 from .diff import diff
 from .inspect import FORMAT_VERSION, render
-from .mpq import MpqArchive, MpqError, SCENARIO_PATH, looks_like_mpq
+from .mpq import (
+    MpqArchive,
+    MpqError,
+    SCENARIO_PATH,
+    looks_like_mpq,
+    write_scenario,
+)
 
 __all__ = ["main"]
+
 
 def _load(path: pathlib.Path) -> Chk:
     """Read a bare ``scenario.chk``, or pull one out of a ``.scm``/``.scx``.
@@ -59,6 +68,53 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     sys.stdout.write(report.to_json() if args.json else report.to_text())
     # Exit codes follow diff(1): 0 identical, 1 differences found.
     return 0 if report.is_empty else 1
+
+
+def _cmd_unpack(args: argparse.Namespace) -> int:
+    """Extract ``staredit\\scenario.chk`` from a map archive."""
+    source = pathlib.Path(args.map)
+    if not source.is_file():
+        raise SystemExit(f"not a file: {source}")
+    raw = source.read_bytes()
+    if not looks_like_mpq(raw):
+        raise SystemExit(f"{source} is not an MPQ archive")
+    try:
+        chk = MpqArchive(raw).read_file(SCENARIO_PATH)
+    except MpqError as exc:
+        raise SystemExit(f"{source}: {exc}") from exc
+    destination = pathlib.Path(args.out)
+    destination.write_bytes(chk)
+    print(f"wrote {destination} ({len(chk)} bytes)")
+    return 0
+
+
+def _cmd_pack(args: argparse.Namespace) -> int:
+    """Wrap a ``scenario.chk`` into a playable map archive."""
+    source = pathlib.Path(args.chk)
+    if not source.is_file():
+        raise SystemExit(f"not a file: {source}")
+    raw = source.read_bytes()
+    if looks_like_mpq(raw):
+        raise SystemExit(f"{source} is already an archive; did you mean unpack?")
+
+    # Refuse to emit something the reader cannot make sense of. A map that fails
+    # to parse here will fail in StarCraft too, and silently writing it wastes
+    # the user's time later rather than now.
+    chk = Chk.from_bytes(raw)
+    if chk.has_errors and not args.force:
+        for diagnostic in chk.diagnostics:
+            if diagnostic.severity == "error":
+                print(f"error: {diagnostic}", file=sys.stderr)
+        raise SystemExit(
+            f"{source} has parse errors; pass --force to pack it anyway"
+        )
+
+    destination = pathlib.Path(args.out)
+    archive = write_scenario(raw, compress=args.compress)
+    destination.write_bytes(archive)
+    ratio = f", {len(archive) / len(raw):.0%} of the scenario" if raw else ""
+    print(f"wrote {destination} ({len(archive)} bytes{ratio})")
+    return 0
 
 
 def _cmd_textconv(args: argparse.Namespace) -> int:
@@ -176,6 +232,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit machine-readable JSON instead of text",
     )
     compare.set_defaults(func=_cmd_diff)
+
+    unpack = sub.add_parser(
+        "unpack", help="extract scenario.chk from a .scm/.scx map archive"
+    )
+    unpack.add_argument("map", help="path to a .scm or .scx")
+    unpack.add_argument("out", help="path to write scenario.chk to")
+    unpack.set_defaults(func=_cmd_unpack)
+
+    pack = sub.add_parser(
+        "pack",
+        help="wrap a scenario.chk into a .scm/.scx map archive",
+        description=(
+            "Wrap a scenario.chk into a map archive. Stores the scenario "
+            "uncompressed by default, which every reader accepts; --compress "
+            "uses zlib, which is what euddraft writes for production maps."
+        ),
+    )
+    pack.add_argument("chk", help="path to a scenario.chk")
+    pack.add_argument("out", help="path to write the map archive to")
+    pack.add_argument(
+        "--compress", action="store_true", help="zlib-compress the scenario"
+    )
+    pack.add_argument(
+        "--force", action="store_true", help="pack even if the scenario has parse errors"
+    )
+    pack.set_defaults(func=_cmd_pack)
 
     textconv = sub.add_parser(
         "textconv",
