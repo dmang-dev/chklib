@@ -1,0 +1,357 @@
+"""A stable, deterministic textual rendering of a CHK.
+
+This is the output behind ``chkdiff inspect``, and it is shaped by its main
+consumer: ``git config diff.scx.textconv``. Git runs its ordinary line diff over
+two of these, so the format's job is to make a small change to a map produce a
+small change in the text.
+
+Three rules follow from that.
+
+**Determinism.** The same bytes must always produce the same characters. No
+paths, no timestamps, no iteration-order accidents, no locale-dependent
+formatting. Two runs on two machines must agree.
+
+**One fact per line.** A moved unit should be one changed line, not a reflowed
+block.
+
+**Canonical ordering where order carries no meaning.** Units and sprites are
+sorted by content, so inserting one produces a single added line rather than
+renumbering everything after it. Triggers, locations and strings keep their file
+order, because for them the index *is* the identity -- trigger order is execution
+order, and location and string indices are referenced by id from elsewhere in the
+map.
+
+Nothing here invents information. Unit and sprite types are printed as numbers
+because naming them requires ``units.dat`` from a StarCraft installation, which
+this library does not read.
+"""
+
+from __future__ import annotations
+
+from typing import Iterable
+
+from .chk import Chk
+from .enums import (
+    ActionType,
+    BriefingActionType,
+    ConditionType,
+    Race,
+    SlotType,
+    Tileset,
+)
+from .records import Action, Condition, Trigger
+from .views import (
+    Dimensions,
+    Forces,
+    StringTableView,
+    view_for,
+)
+
+__all__ = ["render", "FORMAT_VERSION"]
+
+FORMAT_VERSION = 1
+"""Bumped when the output shape changes in a way that would churn every diff."""
+
+_FORCE_FLAG_NAMES = (
+    (0x01, "RandomizeStartLocation"),
+    (0x02, "RandomAllies"),
+    (0x04, "AlliedVictory"),
+    (0x08, "SharedVision"),
+)
+
+
+def _quote(raw: bytes | None) -> str:
+    """Render bytes as a deterministic quoted string.
+
+    Printable ASCII passes through; everything else becomes ``\\xNN``. No
+    encoding is guessed, because no source states one.
+    """
+    if raw is None:
+        return "-"
+    out = ['"']
+    for b in raw:
+        if b == 0x22:
+            out.append('\\"')
+        elif b == 0x5C:
+            out.append("\\\\")
+        elif b == 0x09:
+            out.append("\\t")
+        elif b == 0x0A:
+            out.append("\\n")
+        elif b == 0x0D:
+            out.append("\\r")
+        elif 0x20 <= b < 0x7F:
+            out.append(chr(b))
+        else:
+            out.append(f"\\x{b:02x}")
+    out.append('"')
+    return "".join(out)
+
+
+def _enum_name(enum_cls, value: int) -> str:
+    try:
+        return enum_cls(value).name
+    except ValueError:
+        return f"Unknown{value}"
+
+
+def _flag_names(value: int, table: Iterable[tuple[int, str]]) -> str:
+    names = [name for bit, name in table if value & bit]
+    known = 0
+    for bit, _ in table:
+        known |= bit
+    if value & ~known:
+        names.append(f"unknown:0x{value & ~known:02x}")
+    return "|".join(names) if names else "none"
+
+
+def _string_of(strings: StringTableView | None, string_id: int) -> str:
+    if string_id == 0:
+        return "-"
+    if strings is None:
+        return f"#{string_id}"
+    raw = strings.get(string_id)
+    return f"#{string_id} {_quote(raw)}" if raw is not None else f"#{string_id} <unreadable>"
+
+
+def _condition_line(condition: Condition) -> str:
+    name = _enum_name(ConditionType, condition.condition_type)
+    parts = []
+    if condition.player:
+        parts.append(f"player={condition.player}")
+    if condition.amount:
+        parts.append(f"amount={condition.amount}")
+    if condition.unit_type:
+        parts.append(f"unit={condition.unit_type}")
+    if condition.location_id:
+        parts.append(f"loc={condition.location_id}")
+    if condition.comparison:
+        parts.append(f"cmp={condition.comparison}")
+    if condition.type_index:
+        parts.append(f"index={condition.type_index}")
+    if condition.flags:
+        parts.append(f"flags=0x{condition.flags:02x}")
+    if condition.mask_flag:
+        parts.append(f"mask=0x{condition.mask_flag:04x}")
+    return f"{name}({', '.join(parts)})"
+
+
+def _action_line(action: Action, strings: StringTableView | None, briefing: bool) -> str:
+    enum_cls = BriefingActionType if briefing else ActionType
+    name = _enum_name(enum_cls, action.action_type)
+    parts = []
+    if action.string_id:
+        parts.append(f"text={_string_of(strings, action.string_id)}")
+    if action.sound_string_id:
+        parts.append(f"sound={_string_of(strings, action.sound_string_id)}")
+    if action.location_id:
+        parts.append(f"loc={action.location_id}")
+    if action.group:
+        parts.append(f"group={action.group}")
+    if action.number:
+        parts.append(f"number={action.number}")
+    if action.time:
+        parts.append(f"time={action.time}")
+    if action.type:
+        parts.append(f"type={action.type}")
+    if action.type2:
+        parts.append(f"type2={action.type2}")
+    if action.flags:
+        parts.append(f"flags=0x{action.flags:02x}")
+    if action.padding:
+        parts.append(f"padding=0x{action.padding:02x}")
+    if action.mask_flag:
+        parts.append(f"mask=0x{action.mask_flag:04x}")
+    return f"{name}({', '.join(parts)})"
+
+
+def _owners_summary(trigger: Trigger) -> str:
+    from .enums import OWNER_SLOT_LABELS
+
+    parts = []
+    for index in trigger.owner_indices():
+        label = (
+            OWNER_SLOT_LABELS[index]
+            if index < len(OWNER_SLOT_LABELS)
+            else f"slot{index}"
+        )
+        value = trigger.owners[index]
+        parts.append(label if value == 1 else f"{label}:{value}")
+    return ",".join(parts) if parts else "none"
+
+
+def render(chk: Chk, *, source: str | None = None) -> str:
+    """Render ``chk`` as deterministic text.
+
+    ``source`` is included only when given. Leave it out for anything a diff
+    consumes -- git passes a temporary filename that changes every invocation.
+    """
+    out: list[str] = [f"# openstaredit inspect v{FORMAT_VERSION}"]
+    if source is not None:
+        out.append(f"# source {source}")
+
+    strings = view_for(chk, "STR")
+    dim: Dimensions | None = view_for(chk, "DIM")
+    version = view_for(chk, "VER")
+    era = view_for(chk, "ERA")
+    sprp = view_for(chk, "SPRP")
+
+    # -- map ---------------------------------------------------------------
+    out += ["", "[map]"]
+    if version is not None:
+        out.append(f"version      {version.value}  {version.name}")
+    if era is not None:
+        out.append(f"tileset      {era.value}  {_enum_name(Tileset, era.value)}")
+    if dim is not None:
+        out.append(
+            f"dimensions   {dim.tile_width}x{dim.tile_height} tiles"
+            f"  ({dim.pixel_width}x{dim.pixel_height} px)"
+        )
+    if sprp is not None:
+        out.append(f"name         {_string_of(strings, sprp.name_string_id)}")
+        out.append(f"description  {_string_of(strings, sprp.description_string_id)}")
+
+    # -- players -----------------------------------------------------------
+    ownr = view_for(chk, "OWNR")
+    iown = view_for(chk, "IOWN")
+    side = view_for(chk, "SIDE")
+    forces: Forces | None = view_for(chk, "FORC")
+    if ownr is not None or side is not None:
+        out += ["", "[players]"]
+        for player in range(12):
+            bits = [f"p{player + 1:<2}"]
+            if ownr is not None and player < len(ownr):
+                bits.append(f"slot={ownr[player]} {_enum_name(SlotType, ownr[player])}")
+            if side is not None and player < len(side):
+                bits.append(f"race={side[player]} {_enum_name(Race, side[player])}")
+            if forces is not None and player < len(forces.player_force):
+                bits.append(f"force={forces.player_force[player] + 1}")
+            out.append("  ".join(bits))
+        if iown is not None and ownr is not None and bytes(iown.slot_types) != bytes(ownr.slot_types):
+            # No source states a precedence rule, so a disagreement is surfaced.
+            out.append(f"note         IOWN differs from OWNR: {list(iown.slot_types)}")
+
+    # -- forces ------------------------------------------------------------
+    if forces is not None:
+        out += ["", "[forces]"]
+        for index in range(4):
+            name = _string_of(strings, forces.force_string_ids[index])
+            flags = forces.flags[index]
+            members = ",".join(f"p{p + 1}" for p in forces.players_in(index)) or "none"
+            out.append(
+                f"force{index + 1}  {name}  flags=0x{flags:02x} "
+                f"{_flag_names(flags, _FORCE_FLAG_NAMES)}  players={members}"
+            )
+
+    # -- sections ----------------------------------------------------------
+    out += ["", f"[sections] {len(chk)}"]
+    for section in chk:
+        marker = "  TRUNCATED" if section.is_truncated else ""
+        out.append(f"{section.label:<5} {len(section.data):>8}{marker}")
+    if chk.trailing:
+        out.append(f"{'<tail>':<5} {len(chk.trailing):>8}")
+    for diagnostic in chk.diagnostics:
+        out.append(f"! {diagnostic}")
+
+    # -- strings -----------------------------------------------------------
+    if strings is not None:
+        used = strings.used_ids()
+        out += ["", f"[strings] {len(used)} used of {strings.count} slots"]
+        for string_id in used:
+            out.append(f"{string_id:>5}  {_quote(strings.get(string_id))}")
+
+    # -- locations ---------------------------------------------------------
+    mrgn = view_for(chk, "MRGN")
+    if mrgn is not None:
+        used_locations = [
+            (i, loc) for i, loc in enumerate(mrgn) if not loc.is_unused_slot
+        ]
+        out += ["", f"[locations] {len(used_locations)} used of {len(mrgn)} slots"]
+        for index, loc in used_locations:
+            # Location ids are 1-based: file record k is trigger location k+1.
+            out.append(
+                f"{index + 1:>5}  {_string_of(strings, loc.string_id):<28}"
+                f"  ({loc.left},{loc.top})-({loc.right},{loc.bottom})"
+                f"  elev=0x{loc.elevation_flags:04x}"
+            )
+
+    # -- units -------------------------------------------------------------
+    units = view_for(chk, "UNIT")
+    if units is not None:
+        out += ["", f"[units] {len(units)}  (sorted by owner,type,x,y for diff stability)"]
+        for unit in sorted(
+            units, key=lambda u: (u.owner, u.type, u.xc, u.yc, u.class_id)
+        ):
+            bits = [
+                f"p{unit.owner + 1:<3}",
+                f"type={unit.type:<4}",
+                f"at=({unit.xc},{unit.yc})",
+            ]
+            if unit.valid_field_flags & 0x02:
+                bits.append(f"hp={unit.hitpoint_percent}%")
+            if unit.valid_field_flags & 0x04:
+                bits.append(f"shield={unit.shield_percent}%")
+            if unit.valid_field_flags & 0x08:
+                bits.append(f"energy={unit.energy_percent}%")
+            if unit.valid_field_flags & 0x10:
+                bits.append(f"resources={unit.resource_amount}")
+            if unit.valid_field_flags & 0x20:
+                bits.append(f"hangar={unit.hangar_amount}")
+            if unit.state_flags:
+                bits.append(f"state=0x{unit.state_flags:04x}")
+            if unit.relation_flags:
+                bits.append(
+                    f"relation=0x{unit.relation_flags:04x}->{unit.relation_class_id}"
+                )
+            if unit.unused:
+                bits.append(f"unused=0x{unit.unused:08x}")
+            out.append("  ".join(bits))
+        if units.has_partial_record:
+            out.append(f"! trailing partial record: {len(units.trailing)} bytes")
+
+    # -- sprites -----------------------------------------------------------
+    sprites = view_for(chk, "THG2")
+    if sprites is not None:
+        out += ["", f"[sprites] {len(sprites)}  (sorted by owner,type,x,y)"]
+        for sprite in sorted(
+            sprites, key=lambda s: (s.owner, s.type, s.xc, s.yc, s.flags)
+        ):
+            kind = "unit" if sprite.is_sprite_unit else "sprite"
+            bits = [
+                f"p{sprite.owner + 1:<3}",
+                f"type={sprite.type:<4}",
+                f"at=({sprite.xc},{sprite.yc})",
+                f"as={kind}",
+                f"flags=0x{sprite.flags:04x}",
+            ]
+            if sprite.unused:
+                bits.append(f"unused=0x{sprite.unused:02x}")
+            out.append("  ".join(bits))
+
+    # -- triggers ----------------------------------------------------------
+    for name, label, item in (
+        ("TRIG", "triggers", "trigger"),
+        ("MBRF", "briefing", "briefing"),
+    ):
+        view = view_for(chk, name)
+        if view is None:
+            continue
+        out += ["", f"[{label}] {len(view)}"]
+        for index, trigger in enumerate(view):
+            head = f"{item} {index}  owners={_owners_summary(trigger)}"
+            if trigger.flags:
+                head += f"  flags=0x{trigger.flags:08x}"
+            if trigger.current_action:
+                head += f"  currentAction={trigger.current_action}"
+            out.append(head)
+            for condition in trigger.used_conditions():
+                prefix = "  if- " if condition.is_disabled else "  if  "
+                out.append(prefix + _condition_line(condition))
+            for action in trigger.used_actions():
+                prefix = "  do- " if action.is_disabled else "  do  "
+                out.append(prefix + _action_line(action, strings, view.is_briefing))
+        if view.has_partial_trigger:
+            out.append(f"! trailing partial trigger: {len(view.trailing)} bytes")
+
+    out.append("")
+    return "\n".join(out)

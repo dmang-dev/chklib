@@ -3,8 +3,9 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: early.** The section container and typed views are implemented, and both
-round-trip gates are green across a 65-map corpus. The CLI is not built yet.
+**Status: early but usable.** The section container, typed views and `chkdiff inspect`
+are implemented, with round-trip and determinism gates green across a 65-map corpus.
+`chkdiff diff` and MPQ reading are next.
 
 ## Why
 
@@ -101,6 +102,41 @@ The format work behind this is in `.research/SPEC.md` (gitignored, regenerable):
 independent implementations cross-checked against each other and validated against the
 corpus, with every claim carrying a confidence tier and every unresolved disagreement
 listed rather than guessed at.
+
+## `chkdiff inspect`
+
+A deterministic textual rendering of a scenario, designed so that `git diff` can use it
+as a `textconv` driver.
+
+```bash
+chkdiff inspect scenario.chk
+chkdiff inspect --stable scenario.chk    # omit the filename, for git
+```
+
+The point is that a small change to a map becomes a small change in the text. Moving one
+unit and dropping its hitpoints — 3 changed bytes in the binary — reads as:
+
+```diff
+-p12   type=188   at=(224,448)  hp=100%  resources=5000
++p12   type=188   at=(288,448)  hp=55%   resources=5000
+```
+
+Three rules make that work, and they are what the tests pin down:
+
+- **Determinism.** The same bytes always produce the same characters — no paths, no
+  timestamps, no iteration-order accidents. Verified over all 65 corpus maps.
+- **One fact per line.** A moved unit is one changed line, not a reflowed block.
+- **Canonical ordering where order carries no meaning.** Units and sprites are sorted by
+  content and carry no index, so inserting one produces a constant-size diff regardless
+  of how many units the map has. Triggers, locations and strings keep file order, because
+  for them the index *is* the identity.
+
+Nothing is invented: unit and sprite types print as numbers, because naming them needs
+`units.dat` from a StarCraft installation, which this library does not read.
+
+**MPQ archives are not supported yet.** `chkdiff` reads a bare `scenario.chk`; pointing it
+at a `.scm`/`.scx` gives a message explaining how to extract one. That gap has to close
+before the git integration is actually useful, since maps in a repository are archives.
 
 ## Development
 

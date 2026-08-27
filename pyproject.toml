@@ -11,6 +11,9 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []
 
+[project.scripts]
+chkdiff = "openstaredit.cli:main"
+
 [project.optional-dependencies]
 # eudplib is used only by tools/extract_fixtures.py to produce test inputs from
 # real .scm/.scx archives. It is deliberately not a runtime dependency, and an

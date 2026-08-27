@@ -213,3 +213,57 @@ def test_no_partial_records_in_this_corpus() -> None:
                 continue
             trailing = getattr(view, "trailing", b"")
             assert trailing == b"", f"{path.stem}: {name} has a partial record"
+
+
+# --------------------------------------------------------------------------
+# Inspect rendering over real maps
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", MAPS, ids=IDS)
+def test_inspect_is_deterministic_across_reparses(path: pathlib.Path) -> None:
+    """Two independent parses of the same bytes must render identically.
+
+    A git textconv driver that is not deterministic shows spurious churn on
+    every diff, which is worse than having no driver at all.
+    """
+    from openstaredit.inspect import render
+
+    raw = path.read_bytes()
+    assert render(Chk.from_bytes(raw)) == render(Chk.from_bytes(raw))
+
+
+@pytest.mark.parametrize("path", MAPS, ids=IDS)
+def test_inspect_never_leaks_a_path(path: pathlib.Path) -> None:
+    from openstaredit.inspect import render
+
+    out = render(Chk.from_bytes(path.read_bytes()))
+    assert "# source" not in out
+    assert str(path) not in out
+
+
+def test_editing_one_unit_produces_a_local_diff() -> None:
+    """The whole point: a small map change must be a small text change."""
+    import difflib
+    from dataclasses import replace
+
+    from openstaredit.inspect import render
+    from openstaredit.views import view_for as _view_for
+
+    chk = load(MAPS[0])
+    before = render(chk)
+
+    units = _view_for(chk, "UNIT")
+    assert len(units) > 3
+    units.records[3].xc += 64
+    section = chk.last("UNIT")
+    chk.sections[chk.sections.index(section)] = replace(section, data=units.to_bytes())
+    after = render(chk)
+
+    changed = [
+        line for line in difflib.unified_diff(
+            before.splitlines(), after.splitlines(), lineterm="", n=0
+        )
+        if line[:1] in "+-" and not line.startswith(("+++", "---"))
+    ]
+    assert len(changed) == 2, f"expected one line replaced, got {changed}"

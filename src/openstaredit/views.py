@@ -24,7 +24,7 @@ from .chk import Chk, Section
 from .records import Action, Condition, Location, Sprite, Trigger, Unit
 
 __all__ = [
-    "Dimensions", "PlayerSlots", "PlayerRaces", "ScenarioProperties",
+    "Dimensions", "PlayerSlots", "PlayerRaces", "ScenarioProperties", "Forces",
     "Version", "TilesetRef", "RecordArrayView", "TriggerListView",
     "StringTableView", "view_for", "TYPED_SECTIONS",
 ]
@@ -202,6 +202,47 @@ class ScenarioProperties(_ScalarView):
 
     def _pack(self) -> bytes:
         return _U16X2.pack(self.name_string_id, self.description_string_id)
+
+
+@dataclass(slots=True)
+class Forces(_ScalarView):
+    """``FORC`` -- force settings, 20 bytes nominal (SPEC 2.11).
+
+    ``player_force`` covers only the **8 playable slots**; players 9-12 have no
+    entry, unlike ``OWNR``/``SIDE`` which are 12 wide.
+
+    A FORC shorter than 20 bytes is legal per Chkdraft but what it means is
+    unresolved (SPEC 7.4), so a short section is parsed zero-extended and
+    re-emitted at its original length rather than padded out.
+    """
+
+    SECTION: ClassVar[str] = "FORC"
+    NOMINAL: ClassVar[int] = 20
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<8B4H4B")
+
+    player_force: bytes = b""
+    force_string_ids: tuple[int, ...] = ()
+    flags: bytes = b""
+
+    @classmethod
+    def from_section(cls, section: Section) -> "Forces":
+        unpacked = cls._STRUCT.unpack(_padded(section.data, 20)[:20])
+        return cls(
+            raw=section.data,
+            section=section,
+            player_force=bytes(unpacked[0:8]),
+            force_string_ids=tuple(unpacked[8:12]),
+            flags=bytes(unpacked[12:16]),
+        )
+
+    def _pack(self) -> bytes:
+        return self._STRUCT.pack(
+            *self.player_force, *self.force_string_ids, *self.flags
+        )
+
+    def players_in(self, force: int) -> list[int]:
+        """0-based playable slots assigned to ``force`` (0-3)."""
+        return [i for i, f in enumerate(self.player_force) if f == force]
 
 
 @dataclass(slots=True)
@@ -438,6 +479,7 @@ TYPED_SECTIONS: dict[str, str] = {
     "IOWN": "PlayerSlots",
     "SIDE": "PlayerRaces",
     "SPRP": "ScenarioProperties",
+    "FORC": "Forces",
     "UNIT": "RecordArrayView[Unit]",
     "THG2": "RecordArrayView[Sprite]",
     "MRGN": "RecordArrayView[Location]",
@@ -456,6 +498,7 @@ _SCALAR_SECTIONS: dict[str, type] = {
     "IOWN": PlayerSlots,
     "SIDE": PlayerRaces,
     "SPRP": ScenarioProperties,
+    "FORC": Forces,
     "STR": StringTableView,
 }
 

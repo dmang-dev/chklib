@@ -3,6 +3,7 @@
 from .chk import SECTION_HEADER_SIZE, Chk, Diagnostic, Section
 from .records import Action, Condition, Location, Sprite, Trigger, Unit
 from .views import (
+    Forces,
     Dimensions,
     PlayerRaces,
     PlayerSlots,
@@ -23,7 +24,7 @@ __all__ = [
     "Unit", "Sprite", "Location", "Condition", "Action", "Trigger",
     # views
     "Dimensions", "Version", "TilesetRef", "PlayerSlots", "PlayerRaces",
-    "ScenarioProperties", "RecordArrayView", "TriggerListView",
+    "ScenarioProperties", "Forces", "RecordArrayView", "TriggerListView",
     "StringTableView", "view_for", "TYPED_SECTIONS",
 ]
 __version__ = "0.0.2"
