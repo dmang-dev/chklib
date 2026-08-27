@@ -9,11 +9,15 @@ from .views import (
     PlayerSlots,
     RecordArrayView,
     ScenarioProperties,
+    FogGrid,
     StringTable,
     StringTableView,
+    TileGrid,
     TilesetRef,
     TriggerListView,
     Version,
+    string_table_for,
+    terrain_for,
     view_for,
     TYPED_SECTIONS,
 )
@@ -26,6 +30,7 @@ __all__ = [
     # views
     "Dimensions", "Version", "TilesetRef", "PlayerSlots", "PlayerRaces",
     "ScenarioProperties", "Forces", "RecordArrayView", "TriggerListView",
-    "StringTableView", "StringTable", "view_for", "TYPED_SECTIONS",
+    "StringTableView", "StringTable", "TileGrid", "FogGrid",
+    "terrain_for", "string_table_for", "view_for", "TYPED_SECTIONS",
 ]
 __version__ = "0.0.2"

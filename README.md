@@ -3,8 +3,8 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: working end to end.** Container, typed views, string-table editing (`STR` and
-`STRx`), MPQ reading *and* writing, `chkdiff inspect`, `chkdiff diff`, `pack`/`unpack`, and the git
+**Status: working end to end.** Container, typed views, terrain, string-table editing
+(`STR` and `STRx`), MPQ reading *and* writing, `chkdiff inspect`, `chkdiff diff`, `pack`/`unpack`, and the git
 integration are all implemented and tested. A map can be opened, edited — including its
 name, description and any trigger text — and saved back to a playable archive.
 
@@ -226,6 +226,41 @@ magnitude, none of which is a format limit.
 
 Rebuilding the string table of all 65 corpus maps preserves every string at its own id,
 and a rename leaves every location name still resolving.
+
+### Terrain
+
+```python
+from openstaredit.views import terrain_for
+
+game = terrain_for(chk, "MTXM")     # what StarCraft reads
+editor = terrain_for(chk, "TILE")   # the editor's ISOM-derived layer
+fog = terrain_for(chk, "MASK")
+
+game[5, 42] = 0x0864                # (x, y), row-major
+chk.replace_section("MTXM", game.to_bytes())
+```
+
+Three things here corrupt terrain silently rather than raising, so each is pinned by a
+test:
+
+**Indexing is row-major**, `y * width + x`. Chkdraft's own header comments declare these
+arrays column-major — and the same wrong comment appears verbatim on MTXM, TILE, ISOM and
+MASK — while every accessor in that codebase uses row-major. On a square map the two are
+indistinguishable, so the tests use non-square maps.
+
+**MTXM and TILE are distinct layers, never aliases.** They are byte-identical in only
+**1 of 65** corpus maps and differ in the other 64 by a mean of 4.8% of tiles, worst 13.2%.
+
+**A set bit in MASK means the tile *is* fogged** for that player, bit 0 being player 1.
+
+Short, long and odd-length sections are read rather than refused — the game itself
+tolerates them, and `blackvrice`'s hard error would reject real protected maps. `to_bytes()`
+preserves the original length so an unmodified short section stays short; `normalize=True`
+emits the full grid, which is what Chkdraft always does.
+
+`ISOM` is deliberately **not** implemented. Chkdraft's two parsers contradict each other on
+it, one carries a live `size_t` underflow, and the bit layout is Confidence C — it is
+carried through as raw bytes instead of guessed at.
 
 ### `STRx`
 

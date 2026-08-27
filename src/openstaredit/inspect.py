@@ -28,6 +28,7 @@ this library does not read.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Iterable
 
 from .chk import Chk
@@ -44,14 +45,19 @@ from .views import (
     Dimensions,
     Forces,
     StringTableView,
+    TileGrid,
     string_table_for,
+    terrain_for,
     view_for,
 )
 
 __all__ = ["render", "FORMAT_VERSION"]
 
-FORMAT_VERSION = 1
-"""Bumped when the output shape changes in a way that would churn every diff."""
+FORMAT_VERSION = 2
+"""Bumped when the output shape changes in a way that would churn every diff.
+
+v2 added the ``[terrain]`` block.
+"""
 
 _FORCE_FLAG_NAMES = (
     (0x01, "RandomizeStartLocation"),
@@ -275,6 +281,36 @@ def render(chk: Chk, *, source: str | None = None) -> str:
                 f"  ({loc.left},{loc.top})-({loc.right},{loc.bottom})"
                 f"  elev=0x{loc.elevation_flags:04x}"
             )
+
+    # -- terrain -----------------------------------------------------------
+    # A 256x256 map has 65,536 tiles, so dumping them all would bury every other
+    # change in the file. Instead each row gets a short digest: editing one tile
+    # changes exactly one line, and the line number localises the edit to a row.
+    # The summary above it is what a human actually reads.
+    terrain_lines: list[str] = []
+    for name in ("MTXM", "TILE", "MASK"):
+        grid = terrain_for(chk, name)
+        if grid is None:
+            continue
+        notes = []
+        if grid.is_short:
+            notes.append(f"short: {grid.stored_cells} of {grid.width * grid.height} cells")
+        if grid.has_odd_tail:
+            notes.append("odd trailing byte")
+        summary = f"{name}  {grid.width}x{grid.height}"
+        if isinstance(grid, TileGrid):
+            summary += f"  {len(grid.groups())} megatile groups"
+        summary += f"  {len(set(grid.cells))} distinct values"
+        if notes:
+            summary += "  [" + "; ".join(notes) + "]"
+        terrain_lines.append(summary)
+        for y in range(grid.height):
+            digest = hashlib.sha1(
+                b",".join(b"%d" % v for v in grid.row(y))
+            ).hexdigest()[:8]
+            terrain_lines.append(f"  {name} row {y:>3}  {digest}")
+    if terrain_lines:
+        out += ["", "[terrain]"] + terrain_lines
 
     # -- units -------------------------------------------------------------
     units = view_for(chk, "UNIT")

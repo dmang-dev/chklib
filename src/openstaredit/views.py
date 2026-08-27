@@ -26,8 +26,8 @@ from .records import Action, Condition, Location, Sprite, Trigger, Unit
 __all__ = [
     "Dimensions", "PlayerSlots", "PlayerRaces", "ScenarioProperties", "Forces",
     "Version", "TilesetRef", "RecordArrayView", "TriggerListView",
-    "StringTableView", "StringTable", "view_for", "string_table_for",
-    "TYPED_SECTIONS",
+    "StringTableView", "StringTable", "TileGrid", "FogGrid", "terrain_for",
+    "view_for", "string_table_for", "TYPED_SECTIONS",
 ]
 
 _U16 = struct.Struct("<H")
@@ -381,6 +381,203 @@ class TriggerListView:
 
 
 # ---------------------------------------------------------------------------
+# Terrain
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _Grid:
+    """Base for a row-major grid of fixed-width cells covering the map.
+
+    Indexing is ``y * width + x``. Chkdraft's own header comments declare these
+    arrays ``[tileWidth][tileHeight]`` -- column-major -- and the same wrong
+    comment appears verbatim on MTXM, TILE, ISOM and MASK. Every accessor in
+    that codebase, and four independent implementations, use row-major.
+
+    The cell count comes from the **section size**, never from ``DIM``. Sections
+    can legally be short, and the game itself tolerates it; the grid is padded
+    out to the map's dimensions for reading, while ``to_bytes()`` re-emits the
+    original length so an unmodified short section stays short.
+    """
+
+    cells: list[int] = field(default_factory=list, repr=False)
+    width: int = 0
+    height: int = 0
+    raw: bytes = field(default=b"", repr=False)
+    section: Section | None = field(default=None, repr=False)
+
+    CELL: ClassVar[int] = 1
+    SECTION: ClassVar[str] = ""
+
+    # -- access ------------------------------------------------------------
+
+    def index(self, x: int, y: int) -> int:
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            raise IndexError(f"({x}, {y}) is outside a {self.width}x{self.height} map")
+        return y * self.width + x
+
+    def get(self, x: int, y: int) -> int:
+        return self.cells[self.index(x, y)]
+
+    def set(self, x: int, y: int, value: int) -> None:
+        limit = (1 << (self.CELL * 8)) - 1
+        if not 0 <= value <= limit:
+            raise ValueError(f"{value} does not fit in {self.CELL * 8} bits")
+        self.cells[self.index(x, y)] = value
+
+    def __getitem__(self, position: tuple[int, int]) -> int:
+        return self.get(*position)
+
+    def __setitem__(self, position: tuple[int, int], value: int) -> None:
+        self.set(*position, value)
+
+    def __len__(self) -> int:
+        return len(self.cells)
+
+    def row(self, y: int) -> list[int]:
+        start = self.index(0, y)
+        return self.cells[start : start + self.width]
+
+    # -- shape -------------------------------------------------------------
+
+    @property
+    def stored_cells(self) -> int:
+        """How many cells the section actually contained, before padding."""
+        return -(-len(self.raw) // self.CELL)
+
+    @property
+    def is_short(self) -> bool:
+        return self.stored_cells < self.width * self.height
+
+    @property
+    def has_odd_tail(self) -> bool:
+        """True when the section length is not a whole number of cells."""
+        return bool(len(self.raw) % self.CELL)
+
+    # -- writing -----------------------------------------------------------
+
+    def to_bytes(self, *, normalize: bool = False) -> bytes:
+        """Serialize.
+
+        By default the original section length is preserved, so an unmodified
+        section round-trips byte-exactly even when short or odd. ``normalize``
+        emits the full ``width * height`` grid instead -- which is what Chkdraft
+        always does, turning a short input into a padded output (SPEC 8.3).
+        """
+        packed = self._pack(self.cells)
+        return packed if normalize else _splice(self.raw, packed)
+
+    def _pack(self, cells: list[int]) -> bytes:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+
+@dataclass(slots=True)
+class TileGrid(_Grid):
+    """``MTXM`` or ``TILE`` -- one ``u16`` tile id per map cell (SPEC 3.1, 3.2).
+
+    **MTXM and TILE are two distinct layers, not duplicates.** MTXM is what the
+    game reads; TILE is the editor's ISOM-derived layer. They are byte-identical
+    in only 1 of 65 corpus maps and differ in the other 64 by a mean of 4.72% of
+    tiles, so aliasing one to the other silently corrupts terrain.
+
+    A short, long or odd-length section is read rather than refused. Chkdraft
+    rounds an odd size up and pads; openbw writes a lone trailing byte into the
+    low half of the next tile and stops; bw-chk substitutes tile 0 past the end.
+    blackvrice raises, which would reject real protected maps. Every corpus map
+    is exactly ``w*h*2``, so this tolerance is real code with no datapoint.
+    """
+
+    CELL: ClassVar[int] = 2
+    SECTION: ClassVar[str] = "MTXM"
+
+    @classmethod
+    def from_section(cls, section: Section, width: int, height: int) -> "TileGrid":
+        raw = section.data
+        whole = len(raw) // 2
+        cells = list(struct.unpack_from(f"<{whole}H", raw)) if whole else []
+        if len(raw) % 2:
+            # A lone trailing byte becomes the low half of one more tile, which
+            # is what the game does with it.
+            cells.append(raw[-1])
+        wanted = width * height
+        if len(cells) < wanted:
+            cells.extend([0] * (wanted - len(cells)))
+        elif len(cells) > wanted:
+            cells = cells[:wanted]
+        return cls(cells, width, height, raw, section)
+
+    def _pack(self, cells: list[int]) -> bytes:
+        return struct.pack(f"<{len(cells)}H", *cells)
+
+    @staticmethod
+    def group(tile_id: int) -> int:
+        """The megatile group: ``tileId >> 4``."""
+        return tile_id >> 4
+
+    @staticmethod
+    def group_index(tile_id: int) -> int:
+        """The index within the group: ``tileId & 0xF``."""
+        return tile_id & 0xF
+
+    def groups(self) -> set[int]:
+        """Every distinct megatile group used. A cheap terrain fingerprint."""
+        return {t >> 4 for t in self.cells}
+
+
+@dataclass(slots=True)
+class FogGrid(_Grid):
+    """``MASK`` -- one ``u8`` fog-of-war byte per map cell (SPEC 3.4).
+
+    **A set bit means the tile IS fogged for that player**, bit 0 being player 1.
+    ``0x00`` is visible to everyone and ``0xFF`` is opaque to all eight. The
+    polarity is confirmed by Chkdraft's fog brush and is the sort of thing that
+    inverts silently if assumed.
+
+    Unlike the tile layers, nothing pads MASK after load in any implementation,
+    and openbw explicitly reads only ``min(w*h, bytes available)``. Plan for it
+    to be absent or short.
+    """
+
+    CELL: ClassVar[int] = 1
+    SECTION: ClassVar[str] = "MASK"
+
+    @classmethod
+    def from_section(cls, section: Section, width: int, height: int) -> "FogGrid":
+        raw = section.data
+        cells = list(raw)
+        wanted = width * height
+        if len(cells) < wanted:
+            cells.extend([0] * (wanted - len(cells)))
+        elif len(cells) > wanted:
+            cells = cells[:wanted]
+        return cls(cells, width, height, raw, section)
+
+    def _pack(self, cells: list[int]) -> bytes:
+        return bytes(cells)
+
+    def is_fogged_for(self, x: int, y: int, player: int) -> bool:
+        """``player`` is 0-based, covering players 1-8."""
+        if not 0 <= player < 8:
+            raise ValueError("MASK covers players 1-8 only")
+        return bool(self.get(x, y) & (1 << player))
+
+
+def terrain_for(chk: Chk, name: str = "MTXM") -> TileGrid | FogGrid | None:
+    """Return a terrain grid sized from the map's ``DIM``, or ``None``.
+
+    ``DIM`` is what gives the grid its shape; the section only supplies cells.
+    Without dimensions a grid cannot be indexed, so this returns ``None`` rather
+    than guessing a shape.
+    """
+    section = chk.last(name)
+    dimensions = view_for(chk, "DIM")
+    if section is None or dimensions is None:
+        return None
+    grid_cls = FogGrid if section.key == b"MASK" else TileGrid
+    return grid_cls.from_section(section, dimensions.tile_width, dimensions.tile_height)
+
+
+# ---------------------------------------------------------------------------
 # Strings
 # ---------------------------------------------------------------------------
 
@@ -673,10 +870,14 @@ TYPED_SECTIONS: dict[str, str] = {
     "MBRF": "TriggerListView (briefing action ids)",
     "STR": "StringTableView (read-only)",
     "STRx": "StringTableView, 32-bit (read-only; supersedes STR)",
+    "MTXM": "TileGrid (game terrain)",
+    "TILE": "TileGrid (editor terrain)",
+    "MASK": "FogGrid",
 }
 """Sections this library interprets, and the view each maps to."""
 
 _RECORD_SECTIONS: dict[str, type] = {"UNIT": Unit, "THG2": Sprite, "MRGN": Location}
+_TERRAIN_SECTIONS = frozenset({"MTXM", "TILE", "MASK"})
 _SCALAR_SECTIONS: dict[str, type] = {
     "DIM": Dimensions,
     "VER": Version,
@@ -710,6 +911,10 @@ def view_for(chk: Chk, name: str):
         return TriggerListView.from_section(section, is_briefing=key == "MBRF")
     if key == "STRx":
         return StringTableView.from_section(section, wide=True)
+    if key in _TERRAIN_SECTIONS:
+        # Terrain needs the map's dimensions for its shape, which is why this
+        # takes the whole Chk rather than a lone section.
+        return terrain_for(chk, key)
     view_cls = _SCALAR_SECTIONS.get(key)
     return view_cls.from_section(section) if view_cls else None
 
