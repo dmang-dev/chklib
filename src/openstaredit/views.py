@@ -385,6 +385,33 @@ class TriggerListView:
 # ---------------------------------------------------------------------------
 
 
+def _merge_override(payloads: list[bytes]) -> bytes:
+    """Apply the ``Override`` duplicate-section policy (SPEC 1.5).
+
+    Each later instance patches the **prefix**; a longer earlier instance keeps
+    its tail. Chkdraft's main parser, bw-chk and openbw all agree on this for
+    ``MTXM``, and it is the single most common terrain-protection trick, so
+    last-wins visibly corrupts protected maps by zeroing everything past the
+    short patch. (Chkdraft's *other* parser, ``lite_scenario.cpp``, fully
+    replaces and is the outlier.)
+
+    This is not theoretical. **24 of 423 installed StarCraft maps carry two to
+    four ``MTXM`` sections**, including current ladder maps, and last-wins leaves
+    them mostly empty -- 1,068 of 16,384 tiles on ``(4)Fighting Spirit.scx``.
+    """
+    merged = bytearray()
+    for payload in payloads:
+        if len(payload) >= len(merged):
+            merged = bytearray(payload)
+        else:
+            merged[: len(payload)] = payload
+    return bytes(merged)
+
+
+#: Sections whose duplicates patch the prefix rather than replacing outright.
+_OVERRIDE_SECTIONS = frozenset({b"MTXM"})
+
+
 @dataclass(slots=True)
 class _Grid:
     """Base for a row-major grid of fixed-width cells covering the map.
@@ -394,10 +421,15 @@ class _Grid:
     comment appears verbatim on MTXM, TILE, ISOM and MASK. Every accessor in
     that codebase, and four independent implementations, use row-major.
 
-    The cell count comes from the **section size**, never from ``DIM``. Sections
-    can legally be short, and the game itself tolerates it; the grid is padded
-    out to the map's dimensions for reading, while ``to_bytes()`` re-emits the
-    original length so an unmodified short section stays short.
+    Cells come from the section; the grid's *shape* comes from ``DIM``. Sections
+    can legally be short, long or odd-length, and real maps are: across 488
+    scanned maps, MTXM alone has 55 short, 7 long and 29 odd instances.
+
+    **Writing follows one rule, chosen because the alternatives lose data.** An
+    untouched grid re-emits its original bytes verbatim, so reading and writing a
+    map it does not understand is always byte-exact. A grid that has been edited
+    emits the whole ``width * height`` extent, because an edit can land past the
+    end of a short section and clipping it back would discard the edit silently.
     """
 
     cells: list[int] = field(default_factory=list, repr=False)
@@ -405,29 +437,36 @@ class _Grid:
     height: int = 0
     raw: bytes = field(default=b"", repr=False)
     section: Section | None = field(default=None, repr=False)
+    source: bytes = field(default=b"", repr=False)
+    """The bytes the cells were decoded from -- the merge result when merged."""
     clamped_dimensions: tuple[int, int] | None = None
-    """The ``DIM`` values as declared, when they had to be clamped."""
+    """The ``DIM`` values as declared, when the grid had to be capped."""
     merged_sections: int = 1
     """How many duplicate sections were merged to produce these cells."""
+    modified: bool = False
+    """Set by any successful :meth:`set`, and what selects the write mode."""
 
     CELL: ClassVar[int] = 1
     SECTION: ClassVar[str] = ""
 
-    #: Safety ceiling on either dimension. ``DIM`` is attacker-controlled -- a
-    #: 22-byte file can declare 65535x65535 -- and the grid materialises one cell
-    #: per tile, so trusting it turns a malformed map into a multi-gigabyte
-    #: allocation that kills the process instead of producing a diagnostic. The
-    #: format's own bound is an MTXM payload of at most ``256*256*2`` (chk.h), so
-    #: nothing beyond 256 is a real map. This is a deliberate safety limit, not a
-    #: format rule, and it is recorded on the grid when it bites.
-    MAX_DIMENSION: ClassVar[int] = 256
+    #: Cap on how many cells will be materialised. ``DIM`` is attacker-controlled
+    #: -- a 22-byte file can declare 65535x65535, which is 4.29 billion cells and
+    #: roughly 34 GB -- and no diagnostic is worth dying for. Real maps top out at
+    #: 256x256 = 65,536 cells, so this leaves ample headroom while bounding the
+    #: pathological case. A deliberate safety limit, not a format rule.
+    MAX_CELLS: ClassVar[int] = 262_144
 
     @classmethod
-    def _clamp(cls, width: int, height: int) -> tuple[int, int, tuple[int, int] | None]:
-        limit = cls.MAX_DIMENSION
-        if width <= limit and height <= limit:
+    def _fit(cls, width: int, height: int) -> tuple[int, int, tuple[int, int] | None]:
+        """Cap the grid's size **without changing the row stride**.
+
+        Only ``height`` is reduced. ``width`` is the stride the bytes on disk are
+        laid out with, so shrinking it would silently shift every row after the
+        first and hand back the wrong tiles.
+        """
+        if width <= 0 or height <= 0 or width * height <= cls.MAX_CELLS:
             return width, height, None
-        return min(width, limit), min(height, limit), (width, height)
+        return width, max(cls.MAX_CELLS // width, 0), (width, height)
 
     # -- access ------------------------------------------------------------
 
@@ -444,6 +483,7 @@ class _Grid:
         if not 0 <= value <= limit:
             raise ValueError(f"{value} does not fit in {self.CELL * 8} bits")
         self.cells[self.index(x, y)] = value
+        self.modified = True
 
     def __getitem__(self, position: tuple[int, int]) -> int:
         return self.get(*position)
@@ -471,8 +511,13 @@ class _Grid:
 
     @property
     def stored_cells(self) -> int:
-        """How many cells the section actually contained, before padding."""
-        return -(-len(self.raw) // self.CELL)
+        """How many cells the source actually held, before padding.
+
+        Derived from :attr:`source`, not :attr:`raw`: for a merged grid those
+        differ, and reporting the discarded last fragment's size would describe a
+        fully populated grid as nearly empty.
+        """
+        return -(-len(self.source) // self.CELL)
 
     @property
     def is_short(self) -> bool:
@@ -480,33 +525,29 @@ class _Grid:
 
     @property
     def has_odd_tail(self) -> bool:
-        """True when the section length is not a whole number of cells."""
-        return bool(len(self.raw) % self.CELL)
+        """True when the source length is not a whole number of cells."""
+        return bool(len(self.source) % self.CELL)
 
     # -- writing -----------------------------------------------------------
 
     def to_bytes(self, *, normalize: bool = False) -> bytes:
         """Serialize.
 
-        By default the original section length is preserved, so an unmodified
-        section round-trips byte-exactly even when short or odd. ``normalize``
-        emits the full ``width * height`` grid instead -- which is what Chkdraft
-        always does, turning a short input into a padded output (SPEC 8.3).
+        An **untouched** grid returns its original bytes verbatim, so a map with
+        a short, long, odd or duplicated section survives a read/write cycle
+        byte-exactly even where the grid's own model of it is lossy.
 
-        A grid merged from duplicate sections cannot be written back to one
-        section without either losing cells or rewriting bytes the caller did
-        not touch, so that case requires ``normalize=True`` and an explicit
-        decision about the now-redundant duplicates.
+        An **edited** grid emits the full ``width * height`` extent. Splicing
+        back into the original length instead would silently discard any edit
+        landing past a short section's end -- reachable on 55 short and 29
+        odd-length MTXM instances among real maps -- and, for an odd tail, would
+        write only half of a tile id.
+
+        ``normalize`` forces the full extent regardless.
         """
-        if self.merged_sections > 1 and not normalize:
-            raise ValueError(
-                f"this grid merges {self.merged_sections} duplicate "
-                f"{self.SECTION} sections, so it does not correspond to any one "
-                "of them; call to_bytes(normalize=True) and replace the "
-                "duplicates with a single section"
-            )
-        packed = self._pack(self.cells)
-        return packed if normalize else _splice(self.raw, packed)
+        if not normalize and not self.modified:
+            return bytes(self.raw)
+        return self._pack(self.cells)
 
     def _pack(self, cells: list[int]) -> bytes:  # pragma: no cover - overridden
         raise NotImplementedError
@@ -518,14 +559,14 @@ class TileGrid(_Grid):
 
     **MTXM and TILE are two distinct layers, not duplicates.** MTXM is what the
     game reads; TILE is the editor's ISOM-derived layer. They are byte-identical
-    in only 1 of 65 corpus maps and differ in the other 64 by a mean of 4.72% of
+    in only 1 of 65 corpus maps and differ in the other 64 by a mean of 4.8% of
     tiles, so aliasing one to the other silently corrupts terrain.
 
     A short, long or odd-length section is read rather than refused. Chkdraft
     rounds an odd size up and pads; openbw writes a lone trailing byte into the
     low half of the next tile and stops; bw-chk substitutes tile 0 past the end.
-    blackvrice raises, which would reject real protected maps. Every corpus map
-    is exactly ``w*h*2``, so this tolerance is real code with no datapoint.
+    blackvrice raises, which would reject real maps -- and they exist: 55 short,
+    7 long and 29 odd MTXM instances across 488 scanned maps.
     """
 
     CELL: ClassVar[int] = 2
@@ -536,7 +577,7 @@ class TileGrid(_Grid):
                      *, data: bytes | None = None, merged: int = 1) -> "TileGrid":
         raw = section.data
         source = raw if data is None else data
-        width, height, clamped = cls._clamp(width, height)
+        width, height, clamped = cls._fit(width, height)
         wanted = width * height
         # Unpack only what the grid can hold. A section far larger than the map
         # would otherwise be fully materialised and then thrown away.
@@ -548,7 +589,7 @@ class TileGrid(_Grid):
             cells.append(source[-1])
         if len(cells) < wanted:
             cells.extend([0] * (wanted - len(cells)))
-        return cls(cells, width, height, raw, section, clamped, merged)
+        return cls(cells, width, height, raw, section, source, clamped, merged)
 
     def _pack(self, cells: list[int]) -> bytes:
         return struct.pack(f"<{len(cells)}H", *cells)
@@ -578,8 +619,8 @@ class FogGrid(_Grid):
     inverts silently if assumed.
 
     Unlike the tile layers, nothing pads MASK after load in any implementation,
-    and openbw explicitly reads only ``min(w*h, bytes available)``. Plan for it
-    to be absent or short.
+    and openbw explicitly reads only ``min(w*h, bytes available)``. It is absent
+    or short on real maps -- 11 short and 7 long instances across 488 scanned.
     """
 
     CELL: ClassVar[int] = 1
@@ -590,12 +631,12 @@ class FogGrid(_Grid):
                      *, data: bytes | None = None, merged: int = 1) -> "FogGrid":
         raw = section.data
         source = raw if data is None else data
-        width, height, clamped = cls._clamp(width, height)
+        width, height, clamped = cls._fit(width, height)
         wanted = width * height
         cells = list(source[:wanted])
         if len(cells) < wanted:
             cells.extend([0] * (wanted - len(cells)))
-        return cls(cells, width, height, raw, section, clamped, merged)
+        return cls(cells, width, height, raw, section, source, clamped, merged)
 
     def _pack(self, cells: list[int]) -> bytes:
         return bytes(cells)
@@ -607,50 +648,46 @@ class FogGrid(_Grid):
         return bool(self.get(x, y) & (1 << player))
 
 
-def _merge_override(payloads: list[bytes]) -> bytes:
-    """Apply the ``Override`` duplicate-section policy (SPEC 1.5).
-
-    Each later instance patches the **prefix**; a longer earlier instance keeps
-    its tail. Chkdraft's main parser, bw-chk and openbw all agree on this for
-    ``MTXM``, and it is the single most common terrain-protection trick, so
-    last-wins visibly corrupts protected maps by zeroing everything past the
-    short patch. (Chkdraft's *other* parser, ``lite_scenario.cpp``, fully
-    replaces and is the outlier.)
-    """
-    merged = bytearray()
-    for payload in payloads:
-        if len(payload) >= len(merged):
-            merged = bytearray(payload)
-        else:
-            merged[: len(payload)] = payload
-    return bytes(merged)
+#: The only sections this module knows how to shape as a grid.
+TERRAIN_SECTIONS: dict[bytes, type] = {
+    b"MTXM": TileGrid,
+    b"TILE": TileGrid,
+    b"MASK": FogGrid,
+}
 
 
-#: Sections whose duplicates patch the prefix rather than replacing outright.
-_OVERRIDE_SECTIONS = frozenset({"MTXM"})
-
-
-def terrain_for(chk: Chk, name: str = "MTXM") -> TileGrid | FogGrid | None:
+def terrain_for(chk: Chk, name: str | bytes = "MTXM") -> "TileGrid | FogGrid | None":
     """Return a terrain grid sized from the map's ``DIM``, or ``None``.
 
     ``DIM`` is what gives the grid its shape; the section only supplies cells.
     Without dimensions a grid cannot be indexed, so this returns ``None`` rather
     than guessing a shape.
 
+    Only ``MTXM``, ``TILE`` and ``MASK`` are grids. Any other name returns
+    ``None`` instead of decoding, say, ``ISOM`` or ``STR`` as tile ids and
+    reporting confident, fabricated megatile groups. ``ISOM`` in particular is
+    deliberately unimplemented, and fabricating it here would defeat that.
+
     Duplicate ``MTXM`` sections are merged under the ``Override`` policy rather
-    than resolved last-wins, because that is what the game sees. The resulting
-    grid records ``merged_sections`` and refuses to serialize back onto a single
-    section without an explicit ``normalize=True``.
+    than resolved last-wins, because that is what the game sees -- and 24 of 423
+    installed maps need it.
     """
-    sections = chk.find(name)
+    # Accept "MTXM", b"MTXM" and the space-padded forms alike, the way the
+    # container's own lookups do.
+    raw_name = name.encode("ascii") if isinstance(name, str) else bytes(name)
+    key = raw_name.rstrip(b" ").ljust(4, b" ")
+    grid_cls = TERRAIN_SECTIONS.get(key)
+    if grid_cls is None:
+        return None
+
+    sections = chk.find(key)
     dimensions = view_for(chk, "DIM")
     if not sections or dimensions is None:
         return None
-    grid_cls = FogGrid if sections[-1].key == b"MASK" else TileGrid
 
     data = None
     merged = 1
-    if len(sections) > 1 and name.strip() in _OVERRIDE_SECTIONS:
+    if len(sections) > 1 and key in _OVERRIDE_SECTIONS:
         data = _merge_override([s.data for s in sections])
         merged = len(sections)
 
@@ -960,7 +997,6 @@ TYPED_SECTIONS: dict[str, str] = {
 """Sections this library interprets, and the view each maps to."""
 
 _RECORD_SECTIONS: dict[str, type] = {"UNIT": Unit, "THG2": Sprite, "MRGN": Location}
-_TERRAIN_SECTIONS = frozenset({"MTXM", "TILE", "MASK"})
 _SCALAR_SECTIONS: dict[str, type] = {
     "DIM": Dimensions,
     "VER": Version,
@@ -994,7 +1030,7 @@ def view_for(chk: Chk, name: str):
         return TriggerListView.from_section(section, is_briefing=key == "MBRF")
     if key == "STRx":
         return StringTableView.from_section(section, wide=True)
-    if key in _TERRAIN_SECTIONS:
+    if key.rstrip() in ("MTXM", "TILE", "MASK"):
         # Terrain needs the map's dimensions for its shape, which is why this
         # takes the whole Chk rather than a lone section.
         return terrain_for(chk, key)

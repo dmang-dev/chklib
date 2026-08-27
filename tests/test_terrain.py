@@ -307,19 +307,34 @@ def test_duplicate_mtxm_patches_the_prefix_rather_than_replacing() -> None:
     assert grid.merged_sections == 2
 
 
-def test_a_merged_grid_refuses_to_write_back_to_one_section() -> None:
-    """It corresponds to no single section, so silently picking one would either
-    drop cells or rewrite bytes the caller never touched."""
+def test_an_untouched_merged_grid_still_writes_its_original_bytes() -> None:
+    """Duplicate MTXM is not malformed; it is the documented Override case, and
+    24 of 423 installed maps use it. Refusing to serialize would raise on real
+    ladder maps and break the never-raise contract."""
     chk = Chk.from_bytes(
         sect(b"DIM ", struct.pack("<HH", 2, 2))
         + sect(b"MTXM", tiles([1, 2, 3, 4]))
         + sect(b"MTXM", tiles([9]))
     )
     grid = terrain_for(chk)
-    with pytest.raises(ValueError, match="merges 2 duplicate"):
-        grid.to_bytes()
+    assert grid.merged_sections == 2
+    assert grid.to_bytes() == chk.last("MTXM").data
     assert len(grid.to_bytes(normalize=True)) == 4 * 2
 
+
+def test_a_merged_grid_reports_the_merged_shape_not_the_last_fragment() -> None:
+    """stored_cells and friends must describe the cells that exist, not the
+    discarded tail section. Otherwise a fully populated grid reads as nearly
+    empty."""
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 2, 2))
+        + sect(b"MTXM", tiles([1, 2, 3, 4]))
+        + sect(b"MTXM", tiles([9]))
+    )
+    grid = terrain_for(chk)
+    assert grid.stored_cells == 4
+    assert not grid.is_short
+    assert not grid.has_odd_tail
 
 def test_only_mtxm_gets_the_override_policy() -> None:
     """TILE and MASK are Standard: last instance wins entirely."""
@@ -334,25 +349,41 @@ def test_only_mtxm_gets_the_override_policy() -> None:
 
 
 def test_a_hostile_dim_cannot_exhaust_memory() -> None:
-    """DIM is attacker-controlled: a 22-byte file can declare 65535x65535.
-
-    Materialising one cell per declared tile would be ~4.3 billion cells.
-    """
+    """DIM is attacker-controlled: a 22-byte file can declare 65535x65535,
+    which is 4.29 billion cells and roughly 34 GB."""
     chk = Chk.from_bytes(
         sect(b"DIM ", struct.pack("<HH", 65535, 65535)) + sect(b"MTXM", b"\x01\x02")
     )
     grid = terrain_for(chk)
-    assert (grid.width, grid.height) == (256, 256)
+    assert len(grid) <= TileGrid.MAX_CELLS
     assert grid.clamped_dimensions == (65535, 65535)
-    assert len(grid) == 65536
-    assert grid.to_bytes() == b"\x01\x02", "clamping must not break round-trip"
+    assert grid.to_bytes() == b"\x01\x02", "capping must not break round-trip"
 
 
-def test_dimensions_within_the_limit_are_not_clamped() -> None:
+def test_capping_preserves_the_row_stride() -> None:
+    """Only height is reduced. Shrinking width would silently shift every row
+    after the first, handing back the wrong tiles with no error."""
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 65535, 65535)) + sect(b"MTXM", b"\x01\x02")
+    )
+    grid = terrain_for(chk)
+    assert grid.width == 65535, "width is the on-disk stride and must not change"
+    assert grid.height < 65535
+
+    # A grid wider than a hypothetical square cap must still decode correctly.
+    wide = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 257, 3))
+        + sect(b"MTXM", struct.pack("<771H", *range(771)))
+    )
+    g = terrain_for(wide)
+    assert (g.width, g.height) == (257, 3)
+    assert g.get(0, 1) == 257 and g.get(0, 2) == 514
+
+def test_ordinary_dimensions_are_never_capped() -> None:
+    """Real maps top out at 256x256; nothing about them should trip the cap."""
     grid = terrain_for(build(256, 256, mtxm=b"\x00\x00"))
     assert grid.clamped_dimensions is None
     assert (grid.width, grid.height) == (256, 256)
-
 
 def test_a_zero_width_map_does_not_crash_row_walking() -> None:
     """The inspect renderer walks every row; DIM 0xN is malformed but reachable."""
@@ -393,3 +424,107 @@ def test_inspect_flags_a_clamped_dim() -> None:
         sect(b"DIM ", struct.pack("<HH", 4000, 4000)) + sect(b"MTXM", b"\x01\x02")
     )
     assert "clamped" in render(chk)
+
+
+# --------------------------------------------------------------------------
+# Installed maps: the corpus the sc64 fixtures do not represent
+# --------------------------------------------------------------------------
+#
+# Every terrain defect found by the adversarial review was invisible to the
+# fixture corpus, whose 65 scenarios have no duplicate sections and are all
+# exactly w*h*2. The installed maps are not: across 488 scanned maps, MTXM alone
+# has 55 short, 7 long, 29 odd and 24 duplicated instances. These tests exist so
+# that the gap that hid those defects cannot reopen.
+
+import glob  # noqa: E402
+
+INSTALLED = sorted(set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recursive=True)))
+
+
+def _installed_chks():
+    from openstaredit.mpq import MpqArchive, SCENARIO_PATH
+
+    for path in INSTALLED:
+        try:
+            yield path, Chk.from_bytes(
+                MpqArchive(pathlib.Path(path).read_bytes()).read_file(SCENARIO_PATH)
+            )
+        except Exception:  # noqa: BLE001 - MPQ failures are not this module's concern
+            continue
+
+
+@pytest.mark.skipif(not INSTALLED, reason="no StarCraft installation found")
+def test_installed_maps_round_trip_and_never_raise() -> None:
+    """The gate that would have caught the duplicate-MTXM regression."""
+    checked = 0
+    problems: list[str] = []
+    for path, chk in _installed_chks():
+        for name in ("MTXM", "TILE", "MASK"):
+            if name not in chk:
+                continue
+            try:
+                grid = terrain_for(chk, name)
+                data = grid.to_bytes()
+            except Exception as exc:  # noqa: BLE001 - that is the failure
+                problems.append(f"{pathlib.Path(path).name} {name}: {exc}")
+                continue
+            if data != chk.last(name).data:
+                problems.append(f"{pathlib.Path(path).name} {name}: bytes differ")
+            checked += 1
+    assert checked >= 300, f"only {checked} sections checked"
+    assert not problems, f"{len(problems)} problems: {problems[:8]}"
+
+
+@pytest.mark.skipif(not INSTALLED, reason="no StarCraft installation found")
+def test_duplicate_mtxm_occurs_in_real_maps_and_is_merged() -> None:
+    """Not a hypothetical: real ladder maps ship two to four MTXM sections.
+
+    Last-wins leaves them mostly empty, which is the whole point of Override.
+    """
+    duplicated = 0
+    for _, chk in _installed_chks():
+        instances = chk.find("MTXM")
+        if len(instances) < 2:
+            continue
+        duplicated += 1
+        grid = terrain_for(chk, "MTXM")
+        assert grid.merged_sections == len(instances)
+        last_only = sum(1 for c in TileGrid.from_section(
+            instances[-1], grid.width, grid.height).cells if c)
+        merged = sum(1 for c in grid.cells if c)
+        assert merged >= last_only, "merging must not lose tiles"
+    assert duplicated >= 5, f"expected duplicated MTXM in real maps, found {duplicated}"
+
+
+@pytest.mark.skipif(not INSTALLED, reason="no StarCraft installation found")
+def test_short_and_odd_terrain_occurs_in_real_maps() -> None:
+    """The tolerance paths are exercised by real data, not just by fixtures.
+
+    The format research recorded them as "real code with no corpus datapoint",
+    which was true of the 65 fixture scenarios and false of the installed set.
+    """
+    short = odd = 0
+    for _, chk in _installed_chks():
+        for name in ("MTXM", "TILE", "MASK"):
+            if name not in chk:
+                continue
+            grid = terrain_for(chk, name)
+            short += grid.is_short
+            odd += grid.has_odd_tail
+    assert short or odd, "expected short or odd terrain sections among installed maps"
+
+
+def test_inspect_notices_a_change_in_the_unaddressable_tail() -> None:
+    """A bare count would not move when those bytes change, so a diff of an
+    edit out past the map would show nothing at all."""
+    from openstaredit.inspect import render
+
+    def with_tail(tail_value: int) -> str:
+        chk = Chk.from_bytes(
+            sect(b"DIM ", struct.pack("<HH", 1, 1))
+            + sect(b"MTXM", tiles([1] + [tail_value] * 20))
+        )
+        return render(chk)
+
+    assert "not addressable" in with_tail(7)
+    assert with_tail(7) != with_tail(8), "the clipped tail must affect the digest"

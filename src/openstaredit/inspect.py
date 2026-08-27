@@ -297,11 +297,15 @@ def render(chk: Chk, *, source: str | None = None) -> str:
         if grid.is_short:
             notes.append(f"short: {grid.stored_cells} of {addressable} cells")
         if grid.stored_cells > addressable:
-            # Without this, a malformed DIM makes a full section render as an
-            # empty grid with nothing to say that its content exists at all.
+            # Without this a malformed DIM makes a full section render as an
+            # empty grid, with nothing to say its content exists at all. The
+            # digest matters as much as the count: a bare count does not move
+            # when the unreachable bytes themselves change, so a diff would show
+            # nothing for an edit out there.
+            tail = grid.source[addressable * grid.CELL :]
             notes.append(
-                f"{grid.stored_cells - addressable} cells beyond the map are "
-                "not addressable"
+                f"{grid.stored_cells - addressable} cells beyond the map are not "
+                f"addressable, digest {hashlib.sha1(tail).hexdigest()[:8]}"
             )
         if grid.has_odd_tail:
             notes.append("odd trailing byte")
