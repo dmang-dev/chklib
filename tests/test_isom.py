@@ -24,9 +24,9 @@ import struct
 
 import pytest
 
-from openstaredit import Chk
-from openstaredit.records import IsomRect
-from openstaredit.views import IsomGrid, isom_for
+from chklib import Chk
+from chklib.records import IsomRect
+from chklib.views import IsomGrid, isom_for
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -211,7 +211,7 @@ INSTALLED = sorted(set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recu
 
 
 def _real_chks():
-    from openstaredit.mpq import MpqArchive, SCENARIO_PATH
+    from chklib.mpq import MpqArchive, SCENARIO_PATH
 
     for path in CORPUS:
         yield path.name, Chk.from_bytes(path.read_bytes())

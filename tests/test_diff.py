@@ -19,11 +19,11 @@ from dataclasses import replace
 
 import pytest
 
-from openstaredit import Chk
-from openstaredit.cli import main
-from openstaredit.diff import JSON_SCHEMA_VERSION, diff
-from openstaredit.records import Action, Condition, Location, Trigger, Unit
-from openstaredit.views import view_for
+from chklib import Chk
+from chklib.cli import main
+from chklib.diff import JSON_SCHEMA_VERSION, diff
+from chklib.records import Action, Condition, Location, Trigger, Unit
+from chklib.views import view_for
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -392,7 +392,7 @@ def test_broken_pipe_is_handled(tmp_path: pathlib.Path, monkeypatch) -> None:
         def fileno(self):
             raise OSError(9, "Bad file descriptor")
 
-    monkeypatch.setattr("openstaredit.cli.sys.stdout", ClosedPipe())
+    monkeypatch.setattr("chklib.cli.sys.stdout", ClosedPipe())
     assert main(["diff", str(a), str(b)]) == 141  # 128 + SIGPIPE
 
 
@@ -406,5 +406,5 @@ def test_broken_pipe_is_handled_for_inspect(tmp_path: pathlib.Path, monkeypatch)
         def fileno(self):
             raise OSError(9, "Bad file descriptor")
 
-    monkeypatch.setattr("openstaredit.cli.sys.stdout", ClosedPipe())
+    monkeypatch.setattr("chklib.cli.sys.stdout", ClosedPipe())
     assert main(["inspect", str(a)]) == 141

@@ -13,9 +13,9 @@ import struct
 
 import pytest
 
-from openstaredit import Chk, Section
-from openstaredit.records import Location, Sprite, Trigger, Unit
-from openstaredit.views import (
+from chklib import Chk, Section
+from chklib.records import Location, Sprite, Trigger, Unit
+from chklib.views import (
     Dimensions,
     PlayerRaces,
     PlayerSlots,

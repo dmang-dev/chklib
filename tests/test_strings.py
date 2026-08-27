@@ -24,8 +24,8 @@ import struct
 
 import pytest
 
-from openstaredit import Chk, StringTable
-from openstaredit.views import StringTableView, string_table_for, view_for
+from chklib import Chk, StringTable
+from chklib.views import StringTableView, string_table_for, view_for
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -384,7 +384,7 @@ _INSTALLED = sorted(set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", rec
 
 
 def _strx_maps() -> list[bytes]:
-    from openstaredit.mpq import MpqArchive, SCENARIO_PATH
+    from chklib.mpq import MpqArchive, SCENARIO_PATH
 
     out = []
     for path in _INSTALLED:
@@ -403,7 +403,7 @@ STRX_MAPS = _strx_maps() if _INSTALLED else []
 @pytest.mark.skipif(not STRX_MAPS, reason="no installed maps using STRx")
 def test_real_strx_maps_resolve_to_text() -> None:
     """If the field width were wrong, every string would come back empty."""
-    from openstaredit.views import view_for as _view_for
+    from chklib.views import view_for as _view_for
 
     resolved = 0
     for raw in STRX_MAPS:

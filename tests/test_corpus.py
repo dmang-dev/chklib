@@ -14,7 +14,7 @@ import pathlib
 
 import pytest
 
-from openstaredit import Chk
+from chklib import Chk
 
 CORPUS = pathlib.Path(__file__).parent / "fixtures" / "corpus"
 MAPS = sorted(CORPUS.glob("*.chk")) if CORPUS.is_dir() else []

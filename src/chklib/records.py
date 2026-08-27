@@ -11,7 +11,7 @@ write is a silent data change (SPEC 8.1).
 
 The same reasoning applies to flag words. Every flag field is stored as a raw
 integer, never as a set of booleans, because each one has undocumented bits that
-must survive a round-trip (SPEC 8.2). The :mod:`openstaredit.enums` flag classes
+must survive a round-trip (SPEC 8.2). The :mod:`chklib.enums` flag classes
 are an interpretation layer over the raw value, not a replacement for it.
 
 Field offsets are asserted at import time against the spec, so a mistranscribed

@@ -54,10 +54,11 @@ from .views import (
 
 __all__ = ["render", "FORMAT_VERSION"]
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 """Bumped when the output shape changes in a way that would churn every diff.
 
-v2 added the ``[terrain]`` block; v3 added ISOM to it.
+v2 added the ``[terrain]`` block; v3 added ISOM to it; v4 renamed the
+project, which changes the header line on every rendering.
 """
 
 _FORCE_FLAG_NAMES = (
@@ -194,7 +195,7 @@ def render(chk: Chk, *, source: str | None = None) -> str:
     ``source`` is included only when given. Leave it out for anything a diff
     consumes -- git passes a temporary filename that changes every invocation.
     """
-    out: list[str] = [f"# openstaredit inspect v{FORMAT_VERSION}"]
+    out: list[str] = [f"# chklib inspect v{FORMAT_VERSION}"]
     if source is not None:
         out.append(f"# source {source}")
 

@@ -13,7 +13,7 @@ import struct
 
 import pytest
 
-from openstaredit import Chk, Section
+from chklib import Chk, Section
 
 
 def sec(name: bytes, payload: bytes, size: int | None = None) -> bytes:

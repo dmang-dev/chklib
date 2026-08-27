@@ -1,6 +1,6 @@
 """Typed views over CHK sections.
 
-A view is exactly that: an interpretation layered over a :class:`~openstaredit.chk.Section`
+A view is exactly that: an interpretation layered over a :class:`~chklib.chk.Section`
 whose raw bytes remain the source of truth. Views never replace the container's
 bytes, because a typed write cannot reproduce every input (SPEC 8) -- short
 sections, compressed string tables and undocumented flag bits all survive only if
@@ -661,14 +661,14 @@ class FogGrid(_Grid):
 class IsomGrid:
     """``ISOM`` -- the editor's isometric terrain (SPEC 3.3).
 
-    A grid of 8-byte :class:`~openstaredit.records.IsomRect` records on its own
+    A grid of 8-byte :class:`~chklib.records.IsomRect` records on its own
     coordinate system, **not** the tile grid: ``isom_width = tileWidth // 2 + 1``
     and ``isom_height = tileHeight + 1``. Indexing is row-major over that grid.
 
     ISOM is editor-only. StarCraft reads MTXM, so a stale or absent ISOM has no
     in-game effect -- which is exactly why it is the least reliable part of the
     format, and why the values inside each record are exposed rather than
-    interpreted (see :class:`~openstaredit.records.IsomRect`).
+    interpreted (see :class:`~chklib.records.IsomRect`).
 
     Two traps, both from the reference implementations:
 

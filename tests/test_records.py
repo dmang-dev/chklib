@@ -13,7 +13,7 @@ import struct
 
 import pytest
 
-from openstaredit.records import (
+from chklib.records import (
     MAX_ACTIONS,
     MAX_CONDITIONS,
     MAX_OWNERS,

@@ -7,7 +7,7 @@ than useless.
 
 The second property is diff locality: a small change to a map must produce a
 small change in the text. That is what the ordering rules in
-:mod:`openstaredit.inspect` are for, and it is tested here by actually diffing.
+:mod:`chklib.inspect` are for, and it is tested here by actually diffing.
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ import struct
 
 import pytest
 
-from openstaredit import Chk
-from openstaredit.cli import main
-from openstaredit.inspect import FORMAT_VERSION, render
-from openstaredit.records import Location, Trigger, Unit
+from chklib import Chk
+from chklib.cli import main
+from chklib.inspect import FORMAT_VERSION, render
+from chklib.records import Location, Trigger, Unit
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -95,7 +95,7 @@ def test_source_is_omitted_unless_given() -> None:
 
 
 def test_format_version_is_in_the_header() -> None:
-    assert render(minimal_map()).startswith(f"# openstaredit inspect v{FORMAT_VERSION}")
+    assert render(minimal_map()).startswith(f"# chklib inspect v{FORMAT_VERSION}")
 
 
 def test_output_ends_with_a_newline() -> None:
@@ -239,7 +239,7 @@ def test_iown_ownr_disagreement_is_surfaced() -> None:
 
 def test_empty_input_renders_without_crashing() -> None:
     out = render(Chk.from_bytes(b""))
-    assert out.startswith("# openstaredit inspect")
+    assert out.startswith("# chklib inspect")
     assert "[sections] 0" in out
 
 
@@ -253,7 +253,7 @@ def test_cli_inspect(tmp_path: pathlib.Path, capsys) -> None:
     path.write_bytes(minimal_map().to_bytes())
     assert main(["inspect", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "# openstaredit inspect" in out
+    assert "# chklib inspect" in out
     assert f"# source {path}" in out
 
 
@@ -274,7 +274,7 @@ def test_cli_reads_a_real_map_archive(capsys) -> None:
         pytest.skip("no map archives available")
     assert main(["inspect", "--stable", maps[0]]) == 0
     out = capsys.readouterr().out
-    assert "# openstaredit inspect" in out
+    assert "# chklib inspect" in out
     assert "[map]" in out
 
 

@@ -1,4 +1,4 @@
-"""openstaredit - a read/write library for StarCraft map data."""
+"""chklib - a read/write library for StarCraft map data."""
 
 from .chk import SECTION_HEADER_SIZE, Chk, Diagnostic, Section
 from .records import (

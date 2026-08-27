@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "openstaredit"
-version = "0.0.1"
+name = "chklib"
+version = "0.0.2"
 description = "Read/write library for StarCraft map data (CHK), with a diff-oriented CLI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 dependencies = []
 
 [project.scripts]
-chkdiff = "openstaredit.cli:main"
+chkdiff = "chklib.cli:main"
 
 [project.optional-dependencies]
 # eudplib is used only by tools/extract_fixtures.py to produce test inputs from
@@ -23,7 +23,7 @@ fixtures = ["eudplib>=0.80,<0.81"]
 dev = ["pytest>=8"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/openstaredit"]
+packages = ["src/chklib"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

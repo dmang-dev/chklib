@@ -22,7 +22,7 @@ import sys
 
 import pytest
 
-from openstaredit.cli import main
+from chklib.cli import main
 
 MAPS = sorted(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recursive=True))
 
@@ -115,7 +115,7 @@ def test_textconv_is_deterministic_for_unreadable_input(tmp_path: pathlib.Path, 
 def test_textconv_renders_a_real_archive(capsys) -> None:
     assert main(["textconv", MAPS[0]]) == 0
     out = capsys.readouterr().out
-    assert "# openstaredit inspect" in out
+    assert "# chklib inspect" in out
     assert "[map]" in out
 
 
@@ -154,7 +154,7 @@ def _repo(tmp_path: pathlib.Path) -> pathlib.Path:
     _run("config", "user.name", "Test", cwd=repo)
     # Invoke through this interpreter so the test does not depend on the console
     # script being on PATH.
-    driver = f'"{sys.executable}" -m openstaredit.cli textconv'
+    driver = f'"{sys.executable}" -m chklib.cli textconv'
     _run("config", "diff.starcraft.textconv", driver, cwd=repo)
     _run("config", "diff.starcraft.binary", "false", cwd=repo)
     (repo / ".gitattributes").write_text(
@@ -219,7 +219,7 @@ def test_git_diff_on_real_map_archives(tmp_path: pathlib.Path) -> None:
     assert "Binary files" not in out
     assert "[map]" in out or "name" in out
     # Both sides rendered, so git actually ran the driver twice.
-    assert out.count("openstaredit inspect") <= 1  # identical headers collapse
+    assert out.count("chklib inspect") <= 1  # identical headers collapse
 
 
 @pytest.mark.skipif(GIT is None, reason="git not available")

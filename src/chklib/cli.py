@@ -136,10 +136,10 @@ def _cmd_textconv(args: argparse.Namespace) -> int:
         # _load raises SystemExit with a human message; keep the reason but not
         # the path, which git randomises per invocation.
         reason = str(exc).replace(str(path), "").lstrip(": ").strip()
-        sys.stdout.write(f"# openstaredit: unreadable ({reason})\n")
+        sys.stdout.write(f"# chklib: unreadable ({reason})\n")
         return 0
     except Exception as exc:  # noqa: BLE001 - a driver must not propagate
-        sys.stdout.write(f"# openstaredit: unreadable ({type(exc).__name__})\n")
+        sys.stdout.write(f"# chklib: unreadable ({type(exc).__name__})\n")
         return 0
     sys.stdout.write(render(chk, source=None))
     return 0

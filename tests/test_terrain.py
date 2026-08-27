@@ -21,8 +21,8 @@ import struct
 
 import pytest
 
-from openstaredit import Chk
-from openstaredit.views import FogGrid, TileGrid, terrain_for, view_for
+from chklib import Chk
+from chklib.views import FogGrid, TileGrid, terrain_for, view_for
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -394,7 +394,7 @@ def test_a_zero_width_map_does_not_crash_row_walking() -> None:
     assert grid.row(0) == []
     with pytest.raises(IndexError):
         grid.row(8)
-    from openstaredit.inspect import render
+    from chklib.inspect import render
 
     assert "[terrain]" in render(chk)
 
@@ -409,7 +409,7 @@ def test_an_oversized_section_is_not_fully_materialised() -> None:
 
 def test_inspect_flags_unaddressable_terrain() -> None:
     """A malformed DIM would otherwise render a full section as an empty grid."""
-    from openstaredit.inspect import render
+    from chklib.inspect import render
 
     chk = Chk.from_bytes(
         sect(b"DIM ", struct.pack("<HH", 1, 1)) + sect(b"MTXM", tiles([1] * 50))
@@ -418,7 +418,7 @@ def test_inspect_flags_unaddressable_terrain() -> None:
 
 
 def test_inspect_flags_a_clamped_dim() -> None:
-    from openstaredit.inspect import render
+    from chklib.inspect import render
 
     chk = Chk.from_bytes(
         sect(b"DIM ", struct.pack("<HH", 4000, 4000)) + sect(b"MTXM", b"\x01\x02")
@@ -442,7 +442,7 @@ INSTALLED = sorted(set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recu
 
 
 def _installed_chks():
-    from openstaredit.mpq import MpqArchive, SCENARIO_PATH
+    from chklib.mpq import MpqArchive, SCENARIO_PATH
 
     for path in INSTALLED:
         try:
@@ -517,7 +517,7 @@ def test_short_and_odd_terrain_occurs_in_real_maps() -> None:
 def test_inspect_notices_a_change_in_the_unaddressable_tail() -> None:
     """A bare count would not move when those bytes change, so a diff of an
     edit out past the map would show nothing at all."""
-    from openstaredit.inspect import render
+    from chklib.inspect import render
 
     def with_tail(tail_value: int) -> str:
         chk = Chk.from_bytes(

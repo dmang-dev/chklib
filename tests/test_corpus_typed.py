@@ -19,9 +19,9 @@ import pathlib
 
 import pytest
 
-from openstaredit import Chk
-from openstaredit.records import Location, Sprite, Trigger, Unit
-from openstaredit.views import TYPED_SECTIONS, StringTableView, view_for
+from chklib import Chk
+from chklib.records import Location, Sprite, Trigger, Unit
+from chklib.views import TYPED_SECTIONS, StringTableView, view_for
 
 CORPUS = pathlib.Path(__file__).parent / "fixtures" / "corpus"
 MAPS = sorted(CORPUS.glob("*.chk")) if CORPUS.is_dir() else []
@@ -248,7 +248,7 @@ def test_inspect_is_deterministic_across_reparses(path: pathlib.Path) -> None:
     A git textconv driver that is not deterministic shows spurious churn on
     every diff, which is worse than having no driver at all.
     """
-    from openstaredit.inspect import render
+    from chklib.inspect import render
 
     raw = path.read_bytes()
     assert render(Chk.from_bytes(raw)) == render(Chk.from_bytes(raw))
@@ -256,7 +256,7 @@ def test_inspect_is_deterministic_across_reparses(path: pathlib.Path) -> None:
 
 @pytest.mark.parametrize("path", MAPS, ids=IDS)
 def test_inspect_never_leaks_a_path(path: pathlib.Path) -> None:
-    from openstaredit.inspect import render
+    from chklib.inspect import render
 
     out = render(Chk.from_bytes(path.read_bytes()))
     assert "# source" not in out
@@ -268,8 +268,8 @@ def test_editing_one_unit_produces_a_local_diff() -> None:
     import difflib
     from dataclasses import replace
 
-    from openstaredit.inspect import render
-    from openstaredit.views import view_for as _view_for
+    from chklib.inspect import render
+    from chklib.views import view_for as _view_for
 
     chk = load(MAPS[0])
     before = render(chk)
@@ -298,13 +298,13 @@ def test_editing_one_unit_produces_a_local_diff() -> None:
 @pytest.mark.parametrize("path", MAPS, ids=IDS)
 def test_map_diffed_against_itself_is_empty(path: pathlib.Path) -> None:
     """The most basic correctness check a differ can fail."""
-    from openstaredit.diff import diff
+    from chklib.diff import diff
 
     assert diff(load(path), load(path)).is_empty
 
 
 def test_diffing_two_real_maps_is_deterministic_and_non_empty() -> None:
-    from openstaredit.diff import diff
+    from chklib.diff import diff
 
     a, b = load(MAPS[0]), load(MAPS[1])
     first, second = diff(a, b).to_text(), diff(a, b).to_text()
@@ -317,8 +317,8 @@ def test_inserting_a_trigger_into_a_real_map_does_not_cascade() -> None:
     import copy
     from dataclasses import replace
 
-    from openstaredit.diff import diff
-    from openstaredit.views import view_for as _view_for
+    from chklib.diff import diff
+    from chklib.views import view_for as _view_for
 
     original = load(MAPS[0])
     trig = _view_for(original, "TRIG")

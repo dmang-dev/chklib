@@ -21,9 +21,9 @@ import struct
 
 import pytest
 
-from openstaredit import mpq, pkware
-from openstaredit.mpq import MpqArchive, MpqError, SCENARIO_PATH, looks_like_mpq
-from openstaredit.pkware import PkwareError, explode
+from chklib import mpq, pkware
+from chklib.mpq import MpqArchive, MpqError, SCENARIO_PATH, looks_like_mpq
+from chklib.pkware import PkwareError, explode
 
 # Canonical MPQ table keys: hash("(hash table)", 3) and hash("(block table)", 3).
 HASH_TABLE_KEY = 0xC3AF3770
@@ -444,7 +444,7 @@ def test_every_installed_map_survives_a_rewrite(tmp_path: pathlib.Path) -> None:
 
 def test_pack_unpack_cli_round_trip(tmp_path: pathlib.Path, capsys) -> None:
     """The user-facing path: unpack a map, pack it back, read it again."""
-    from openstaredit.cli import main
+    from chklib.cli import main
 
     if not _PAIRS:
         pytest.skip("no fixtures available")
@@ -462,7 +462,7 @@ def test_pack_unpack_cli_round_trip(tmp_path: pathlib.Path, capsys) -> None:
 
 def test_pack_refuses_a_broken_scenario(tmp_path: pathlib.Path, capsys) -> None:
     """A scenario that cannot be parsed would fail in StarCraft too."""
-    from openstaredit.cli import main
+    from chklib.cli import main
 
     bad = tmp_path / "bad.chk"
     bad.write_bytes(b"MTXM" + struct.pack("<i", 0x7FFFFFFF) + b"ab")
@@ -473,7 +473,7 @@ def test_pack_refuses_a_broken_scenario(tmp_path: pathlib.Path, capsys) -> None:
 
 
 def test_pack_rejects_an_archive_as_input(tmp_path: pathlib.Path) -> None:
-    from openstaredit.cli import main
+    from chklib.cli import main
 
     already = tmp_path / "map.scx"
     already.write_bytes(mpq.write_scenario(b"x" * 64))
@@ -482,7 +482,7 @@ def test_pack_rejects_an_archive_as_input(tmp_path: pathlib.Path) -> None:
 
 
 def test_unpack_rejects_a_bare_chk(tmp_path: pathlib.Path) -> None:
-    from openstaredit.cli import main
+    from chklib.cli import main
 
     plain = tmp_path / "scenario.chk"
     plain.write_bytes(b"VER " + struct.pack("<i", 2) + b"\x3b\x00")
