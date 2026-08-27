@@ -3,8 +3,8 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: early.** The section container is implemented and its round-trip gate is
-green. Typed views and the CLI are not built yet.
+**Status: early.** The section container and typed views are implemented, and both
+round-trip gates are green across a 65-map corpus. The CLI is not built yet.
 
 ## Why
 
@@ -55,6 +55,52 @@ chk.to_bytes() == raw       # True, always
 Malformed input is never raised on. Half the interesting maps in the wild are malformed
 on purpose, and a parser that refuses them is useless for exactly the maps people care
 about.
+
+## Typed views
+
+Views are layered *over* the raw bytes, never in place of them, so a read/write cycle
+reproduces the input exactly — including short sections, undocumented flag bits, and the
+fields the format sources only call `unused`.
+
+```python
+from openstaredit import Chk
+from openstaredit.views import view_for
+from openstaredit.enums import Tileset, ActionType
+
+chk = Chk.from_bytes(raw)
+
+view_for(chk, "DIM")            # Dimensions(64x64), .pixel_width, .tile_count
+view_for(chk, "VER").name       # 'Hybrid (Brood War compatible)'
+Tileset(view_for(chk, "ERA").value).name          # 'Badlands'
+
+strings = view_for(chk, "STR")
+sprp    = view_for(chk, "SPRP")
+strings.text(sprp.name_string_id)                 # 'Tutorial 1'
+
+for unit in view_for(chk, "UNIT"):                # 36-byte records
+    unit.owner, unit.xc, unit.yc, unit.type
+
+for trigger in view_for(chk, "TRIG"):             # 2400-byte records
+    for action in trigger.used_actions():
+        ActionType(action.action_type)            # CreateUnitWithProperties, ...
+```
+
+Covered: `DIM VER ERA OWNR IOWN SIDE SPRP UNIT THG2 MRGN TRIG MBRF STR`. Everything else
+is reachable as raw bytes through the container.
+
+Three behaviours worth knowing, each of which a naive implementation gets wrong:
+
+- **`TRIG` and `MBRF` share a byte layout but not an action id space.** Ids 0–9 mean
+  entirely different things in each, so a view carries `is_briefing`.
+- **String ids are 1-based, and strings end at the next NUL** — never at the following
+  slot's offset. In 30 of the 65 corpus maps the string data is not in ascending id
+  order, so offset-differencing yields negative lengths.
+- **Location ids are 1-based too**: `Anywhere` is id 64, which is file record 63.
+
+The format work behind this is in `.research/SPEC.md` (gitignored, regenerable): six
+independent implementations cross-checked against each other and validated against the
+corpus, with every claim carrying a confidence tier and every unresolved disagreement
+listed rather than guessed at.
 
 ## Development
 
