@@ -21,3 +21,6 @@ vcpkg_installed/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Test fixtures extracted from real (copyrighted) maps
+tests/fixtures/
