@@ -128,6 +128,88 @@ class Sprite(Record):
 
 
 @dataclass(slots=True)
+class IsomRect(Record):
+    """One ``ISOM`` cell -- 8 bytes, four ``u16`` sides (SPEC 3.3).
+
+    The record framing is well attested: 8 bytes is backed by the only
+    compile-time assertion in Chkdraft's header,
+    ``static_assert(sizeof(IsomRect) == 8)``.
+
+    The **bit layout inside each side is Confidence C** -- Chkdraft is the only
+    witness -- so each side is kept as a raw ``u16`` and the accessors below are
+    an interpretation over it, never a replacement:
+
+    ===== ======== ==================================================
+    bits  mask     content
+    ===== ======== ==================================================
+    15    0x8000   ``Visited``, a Chkdraft traversal marker
+    14-4  0x7FF0   the ISOM value, stored shifted left by 4
+    3-1   0x000E   edge flags
+    0     0x0001   ``Modified``, a Chkdraft dirty bit
+    ===== ======== ==================================================
+
+    **Both editor flags are written to the file.** ``IsomRect`` is serialized
+    wholesale with no masking; Chkdraft merely clears them after each edit pass,
+    and nothing in the format guarantees they are clear. Mask on read.
+
+    ISOM is editor-only data -- StarCraft itself reads MTXM -- so a map can carry
+    a stale or absent ISOM without any in-game consequence.
+    """
+
+    SIZE: ClassVar[int] = 8
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<HHHH")
+
+    #: Bits 14..4 hold the value, stored shifted left by 4.
+    VALUE_MASK: ClassVar[int] = 0x7FF0
+    VALUE_SHIFT: ClassVar[int] = 4
+    #: Bits 3..1.
+    EDGE_MASK: ClassVar[int] = 0x000E
+    #: Chkdraft-internal, but present in files.
+    VISITED: ClassVar[int] = 0x8000
+    MODIFIED: ClassVar[int] = 0x0001
+    #: Masks off both editor flags, leaving value and edge bits.
+    CLEAR_EDITOR_FLAGS: ClassVar[int] = 0x7FFE
+
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+    @property
+    def sides(self) -> tuple[int, int, int, int]:
+        """The four raw side words, in file order."""
+        return (self.left, self.top, self.right, self.bottom)
+
+    @classmethod
+    def value_of(cls, side: int) -> int:
+        return (side & cls.VALUE_MASK) >> cls.VALUE_SHIFT
+
+    @classmethod
+    def edge_flags_of(cls, side: int) -> int:
+        return side & cls.EDGE_MASK
+
+    def values(self) -> tuple[int, int, int, int]:
+        """The ISOM value of each side, with the editor flags masked off."""
+        return tuple(self.value_of(s) for s in self.sides)  # type: ignore[return-value]
+
+    def edge_flags(self) -> tuple[int, int, int, int]:
+        return tuple(self.edge_flags_of(s) for s in self.sides)  # type: ignore[return-value]
+
+    @property
+    def has_editor_flags(self) -> bool:
+        """True when any side carries a ``Visited`` or ``Modified`` bit.
+
+        A Chkdraft-saved map normally has none, so this marks a file written by
+        something else -- or mid-edit.
+        """
+        return any(s & ~self.CLEAR_EDITOR_FLAGS for s in self.sides)
+
+    @property
+    def is_empty(self) -> bool:
+        return not any(self.sides)
+
+
+@dataclass(slots=True)
 class Location(Record):
     """An ``MRGN`` location -- 20 bytes (SPEC 4.4). Confidence A, five-way.
 

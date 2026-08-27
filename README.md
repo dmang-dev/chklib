@@ -3,7 +3,7 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: working end to end.** Container, typed views, terrain, string-table editing
+**Status: working end to end.** Container, typed views, terrain (including ISOM), string-table editing
 (`STR` and `STRx`), MPQ reading *and* writing, `chkdiff inspect`, `chkdiff diff`, `pack`/`unpack`, and the git
 integration are all implemented and tested. A map can be opened, edited — including its
 name, description and any trigger text — and saved back to a playable archive.
@@ -258,9 +258,38 @@ tolerates them, and `blackvrice`'s hard error would reject real protected maps. 
 preserves the original length so an unmodified short section stays short; `normalize=True`
 emits the full grid, which is what Chkdraft always does.
 
-`ISOM` is deliberately **not** implemented. Chkdraft's two parsers contradict each other on
-it, one carries a live `size_t` underflow, and the bit layout is Confidence C — it is
-carried through as raw bytes instead of guessed at.
+### `ISOM`
+
+The editor's isometric terrain, on its own grid: `isom_width = tileWidth // 2 + 1`,
+`isom_height = tileHeight + 1`, 8 bytes per record.
+
+```python
+from openstaredit.views import isom_for
+
+grid = isom_for(chk)                 # 33x65 records for a 64x64 map
+grid[1, 2].values()                  # the four sides, editor flags masked off
+```
+
+Its **bit layout is the least corroborated thing in the format** — Chkdraft is the only
+witness — so each side stays a raw `u16` and the accessors are an interpretation over it.
+Measuring 488 real maps supports the layout well:
+
+| Claim | Evidence |
+|---|---|
+| framing `(w/2+1)*(h+1)*8` | 455 exact, 7 short, 0 long |
+| value is 11 bits at 14–4 | observed range 0–2014, ceiling 2047 |
+| edge flags are 3 bits at 3–1 | every observed value even, all 8 seen |
+| editor flags reach the file | **21 `Visited` and 50 `Modified` sides found** |
+
+That last row matters: the layout says Chkdraft merely *clears* those bits by convention
+and nothing guarantees it. Real maps carry them, so masking on read is necessary rather
+than defensive.
+
+Two traps avoided. Chkdraft's `scenario.cpp` pads with `expected - actual` computed in
+`size_t` after testing `!=`, so an *oversized* ISOM underflows into an astronomical
+insert; padding here is short-only. And eudplib writes a decoy ISOM with a length past
+`0x80000000` as a protection marker — the container already stops at a negative section
+length, so such a map simply has no ISOM rather than a fabricated one.
 
 ### `STRx`
 

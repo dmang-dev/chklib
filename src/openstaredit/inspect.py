@@ -46,6 +46,7 @@ from .views import (
     Forces,
     StringTableView,
     TileGrid,
+    isom_for,
     string_table_for,
     terrain_for,
     view_for,
@@ -53,10 +54,10 @@ from .views import (
 
 __all__ = ["render", "FORMAT_VERSION"]
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 """Bumped when the output shape changes in a way that would churn every diff.
 
-v2 added the ``[terrain]`` block.
+v2 added the ``[terrain]`` block; v3 added ISOM to it.
 """
 
 _FORCE_FLAG_NAMES = (
@@ -326,6 +327,26 @@ def render(chk: Chk, *, source: str | None = None) -> str:
                 b",".join(b"%d" % v for v in grid.row(y))
             ).hexdigest()[:8]
             terrain_lines.append(f"  {name} row {y:>3}  {digest}")
+    isom = isom_for(chk)
+    if isom is not None:
+        notes = []
+        if isom.is_short:
+            notes.append(f"short: {isom.stored_records} of {len(isom)} records")
+        if len(isom.raw) > isom.expected_size:
+            notes.append(f"{len(isom.raw) - isom.expected_size} bytes past the grid")
+        if isom.has_editor_flags:
+            # Chkdraft clears these after every edit pass, so their presence
+            # says the file came from somewhere else, or was saved mid-edit.
+            notes.append("carries editor flags")
+        summary = f"ISOM  {isom.width}x{isom.height} records"
+        if notes:
+            summary += "  [" + "; ".join(notes) + "]"
+        terrain_lines.append(summary)
+        for y in range(isom.height):
+            row = isom.rects[y * isom.width : (y + 1) * isom.width]
+            digest = hashlib.sha1(b"".join(r.to_bytes() for r in row)).hexdigest()[:8]
+            terrain_lines.append(f"  ISOM row {y:>3}  {digest}")
+
     if terrain_lines:
         out += ["", "[terrain]"] + terrain_lines
 

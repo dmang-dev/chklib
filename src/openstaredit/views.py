@@ -21,12 +21,21 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Iterator
 
 from .chk import Chk, Section
-from .records import Action, Condition, Location, Sprite, Trigger, Unit
+from .records import (
+    Action,
+    Condition,
+    IsomRect,
+    Location,
+    Sprite,
+    Trigger,
+    Unit,
+)
 
 __all__ = [
     "Dimensions", "PlayerSlots", "PlayerRaces", "ScenarioProperties", "Forces",
     "Version", "TilesetRef", "RecordArrayView", "TriggerListView",
-    "StringTableView", "StringTable", "TileGrid", "FogGrid", "terrain_for",
+    "StringTableView", "StringTable", "TileGrid", "FogGrid", "IsomGrid",
+    "terrain_for", "isom_for",
     "view_for", "string_table_for", "TYPED_SECTIONS",
 ]
 
@@ -648,7 +657,135 @@ class FogGrid(_Grid):
         return bool(self.get(x, y) & (1 << player))
 
 
-#: The only sections this module knows how to shape as a grid.
+@dataclass(slots=True)
+class IsomGrid:
+    """``ISOM`` -- the editor's isometric terrain (SPEC 3.3).
+
+    A grid of 8-byte :class:`~openstaredit.records.IsomRect` records on its own
+    coordinate system, **not** the tile grid: ``isom_width = tileWidth // 2 + 1``
+    and ``isom_height = tileHeight + 1``. Indexing is row-major over that grid.
+
+    ISOM is editor-only. StarCraft reads MTXM, so a stale or absent ISOM has no
+    in-game effect -- which is exactly why it is the least reliable part of the
+    format, and why the values inside each record are exposed rather than
+    interpreted (see :class:`~openstaredit.records.IsomRect`).
+
+    Two traps, both from the reference implementations:
+
+    Chkdraft's ``scenario.cpp`` pads with ``expectedSize - actual`` computed in
+    ``size_t`` after testing ``!=``, so an **oversized** ISOM underflows into an
+    astronomically large insert. Padding here is short-only and truncation is
+    explicit.
+
+    eudplib writes a **decoy ISOM with a length past 0x80000000** as a protection
+    marker. The container already stops at a negative section length and keeps
+    the remainder verbatim, so such a map simply has no ISOM section here rather
+    than a fabricated one.
+    """
+
+    rects: list[IsomRect] = field(default_factory=list, repr=False)
+    width: int = 0
+    height: int = 0
+    raw: bytes = field(default=b"", repr=False)
+    section: Section | None = field(default=None, repr=False)
+    modified: bool = False
+
+    RECORD: ClassVar[int] = 8
+    SECTION: ClassVar[str] = "ISOM"
+    #: Same rationale as :attr:`_Grid.MAX_CELLS`: ``DIM`` is attacker-controlled.
+    MAX_RECORDS: ClassVar[int] = 262_144
+
+    @staticmethod
+    def shape_for(tile_width: int, tile_height: int) -> tuple[int, int]:
+        """The ISOM grid's own dimensions for a map of this tile size."""
+        return (tile_width // 2 + 1, tile_height + 1)
+
+    @classmethod
+    def from_section(cls, section: Section, tile_width: int,
+                     tile_height: int) -> "IsomGrid":
+        raw = section.data
+        width, height = cls.shape_for(tile_width, tile_height)
+        if width <= 0 or height <= 0:
+            return cls([], max(width, 0), max(height, 0), raw, section)
+        wanted = width * height
+        if wanted > cls.MAX_RECORDS:
+            height = max(cls.MAX_RECORDS // width, 0)
+            wanted = width * height
+        available = min(len(raw) // cls.RECORD, wanted)
+        rects = [
+            IsomRect.from_bytes(raw[i * cls.RECORD : (i + 1) * cls.RECORD])
+            for i in range(available)
+        ]
+        # Pad short, truncate long -- never Chkdraft's underflowing subtraction.
+        rects.extend(IsomRect(0, 0, 0, 0) for _ in range(wanted - len(rects)))
+        return cls(rects, width, height, raw, section)
+
+    # -- access ------------------------------------------------------------
+
+    def index(self, x: int, y: int) -> int:
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            raise IndexError(
+                f"({x}, {y}) is outside a {self.width}x{self.height} ISOM grid"
+            )
+        return y * self.width + x
+
+    def get(self, x: int, y: int) -> IsomRect:
+        return self.rects[self.index(x, y)]
+
+    def set(self, x: int, y: int, rect: IsomRect) -> None:
+        self.rects[self.index(x, y)] = rect
+        self.modified = True
+
+    def __getitem__(self, position: tuple[int, int]) -> IsomRect:
+        return self.get(*position)
+
+    def __setitem__(self, position: tuple[int, int], rect: IsomRect) -> None:
+        self.set(*position, rect)
+
+    def __len__(self) -> int:
+        return len(self.rects)
+
+    def __iter__(self) -> Iterator[IsomRect]:
+        return iter(self.rects)
+
+    # -- shape -------------------------------------------------------------
+
+    @property
+    def stored_records(self) -> int:
+        return len(self.raw) // self.RECORD
+
+    @property
+    def is_short(self) -> bool:
+        return self.stored_records < self.width * self.height
+
+    @property
+    def expected_size(self) -> int:
+        return self.width * self.height * self.RECORD
+
+    @property
+    def has_editor_flags(self) -> bool:
+        """True when any record carries Chkdraft's ``Visited``/``Modified`` bits."""
+        return any(r.has_editor_flags for r in self.rects)
+
+    def to_bytes(self, *, normalize: bool = False) -> bytes:
+        """Same rule as the tile grids: untouched returns the original bytes."""
+        if not normalize and not self.modified:
+            return bytes(self.raw)
+        return b"".join(r.to_bytes() for r in self.rects)
+
+
+def isom_for(chk: Chk) -> IsomGrid | None:
+    """Return the ``ISOM`` grid sized from the map's ``DIM``, or ``None``."""
+    section = chk.last("ISOM")
+    dimensions = view_for(chk, "DIM")
+    if section is None or dimensions is None:
+        return None
+    return IsomGrid.from_section(
+        section, dimensions.tile_width, dimensions.tile_height
+    )
+
+
+#: The only sections this module knows how to shape as a tile/fog grid.
 TERRAIN_SECTIONS: dict[bytes, type] = {
     b"MTXM": TileGrid,
     b"TILE": TileGrid,
@@ -993,6 +1130,7 @@ TYPED_SECTIONS: dict[str, str] = {
     "MTXM": "TileGrid (game terrain)",
     "TILE": "TileGrid (editor terrain)",
     "MASK": "FogGrid",
+    "ISOM": "IsomGrid (editor-only)",
 }
 """Sections this library interprets, and the view each maps to."""
 
@@ -1034,6 +1172,9 @@ def view_for(chk: Chk, name: str):
         # Terrain needs the map's dimensions for its shape, which is why this
         # takes the whole Chk rather than a lone section.
         return terrain_for(chk, key)
+    if key.rstrip() == "ISOM":
+        # ISOM needs the dimensions too, and its own derived grid shape.
+        return isom_for(chk)
     view_cls = _SCALAR_SECTIONS.get(key)
     return view_cls.from_section(section) if view_cls else None
 
