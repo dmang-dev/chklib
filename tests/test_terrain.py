@@ -283,3 +283,113 @@ def test_no_corpus_map_has_short_or_odd_terrain() -> None:
             grid = terrain_for(chk, name)
             if grid is not None:
                 assert not grid.is_short and not grid.has_odd_tail, f"{path.stem} {name}"
+
+
+# --------------------------------------------------------------------------
+# Hardening found by adversarial review
+# --------------------------------------------------------------------------
+
+
+def test_duplicate_mtxm_patches_the_prefix_rather_than_replacing() -> None:
+    """SPEC 1.5: MTXM duplicates use Override, not last-wins.
+
+    This is the most common terrain-protection trick. Last-wins zeroes
+    everything past the short patch, visibly corrupting the map.
+    """
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 4, 4))
+        + sect(b"MTXM", tiles(list(range(100, 116))))
+        + sect(b"MTXM", tiles([1, 2]))
+    )
+    grid = terrain_for(chk)
+    assert grid.cells[:2] == [1, 2]
+    assert grid.cells[2:] == list(range(102, 116)), "the earlier tail must survive"
+    assert grid.merged_sections == 2
+
+
+def test_a_merged_grid_refuses_to_write_back_to_one_section() -> None:
+    """It corresponds to no single section, so silently picking one would either
+    drop cells or rewrite bytes the caller never touched."""
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 2, 2))
+        + sect(b"MTXM", tiles([1, 2, 3, 4]))
+        + sect(b"MTXM", tiles([9]))
+    )
+    grid = terrain_for(chk)
+    with pytest.raises(ValueError, match="merges 2 duplicate"):
+        grid.to_bytes()
+    assert len(grid.to_bytes(normalize=True)) == 4 * 2
+
+
+def test_only_mtxm_gets_the_override_policy() -> None:
+    """TILE and MASK are Standard: last instance wins entirely."""
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 2, 2))
+        + sect(b"TILE", tiles([1, 2, 3, 4]))
+        + sect(b"TILE", tiles([9]))
+    )
+    grid = terrain_for(chk, "TILE")
+    assert grid.merged_sections == 1
+    assert grid.cells == [9, 0, 0, 0]
+
+
+def test_a_hostile_dim_cannot_exhaust_memory() -> None:
+    """DIM is attacker-controlled: a 22-byte file can declare 65535x65535.
+
+    Materialising one cell per declared tile would be ~4.3 billion cells.
+    """
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 65535, 65535)) + sect(b"MTXM", b"\x01\x02")
+    )
+    grid = terrain_for(chk)
+    assert (grid.width, grid.height) == (256, 256)
+    assert grid.clamped_dimensions == (65535, 65535)
+    assert len(grid) == 65536
+    assert grid.to_bytes() == b"\x01\x02", "clamping must not break round-trip"
+
+
+def test_dimensions_within_the_limit_are_not_clamped() -> None:
+    grid = terrain_for(build(256, 256, mtxm=b"\x00\x00"))
+    assert grid.clamped_dimensions is None
+    assert (grid.width, grid.height) == (256, 256)
+
+
+def test_a_zero_width_map_does_not_crash_row_walking() -> None:
+    """The inspect renderer walks every row; DIM 0xN is malformed but reachable."""
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 0, 8)) + sect(b"MTXM", b"\x01\x02" * 40)
+    )
+    grid = terrain_for(chk)
+    assert grid.row(0) == []
+    with pytest.raises(IndexError):
+        grid.row(8)
+    from openstaredit.inspect import render
+
+    assert "[terrain]" in render(chk)
+
+
+def test_an_oversized_section_is_not_fully_materialised() -> None:
+    """A 4 MB section on a 2x2 map must not unpack two million tiles."""
+    payload = b"\xAB" * 4_000_000
+    grid = terrain_for(build(2, 2, mtxm=payload))
+    assert len(grid) == 4
+    assert grid.to_bytes() == payload
+
+
+def test_inspect_flags_unaddressable_terrain() -> None:
+    """A malformed DIM would otherwise render a full section as an empty grid."""
+    from openstaredit.inspect import render
+
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 1, 1)) + sect(b"MTXM", tiles([1] * 50))
+    )
+    assert "not addressable" in render(chk)
+
+
+def test_inspect_flags_a_clamped_dim() -> None:
+    from openstaredit.inspect import render
+
+    chk = Chk.from_bytes(
+        sect(b"DIM ", struct.pack("<HH", 4000, 4000)) + sect(b"MTXM", b"\x01\x02")
+    )
+    assert "clamped" in render(chk)

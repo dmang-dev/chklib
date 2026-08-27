@@ -405,9 +405,29 @@ class _Grid:
     height: int = 0
     raw: bytes = field(default=b"", repr=False)
     section: Section | None = field(default=None, repr=False)
+    clamped_dimensions: tuple[int, int] | None = None
+    """The ``DIM`` values as declared, when they had to be clamped."""
+    merged_sections: int = 1
+    """How many duplicate sections were merged to produce these cells."""
 
     CELL: ClassVar[int] = 1
     SECTION: ClassVar[str] = ""
+
+    #: Safety ceiling on either dimension. ``DIM`` is attacker-controlled -- a
+    #: 22-byte file can declare 65535x65535 -- and the grid materialises one cell
+    #: per tile, so trusting it turns a malformed map into a multi-gigabyte
+    #: allocation that kills the process instead of producing a diagnostic. The
+    #: format's own bound is an MTXM payload of at most ``256*256*2`` (chk.h), so
+    #: nothing beyond 256 is a real map. This is a deliberate safety limit, not a
+    #: format rule, and it is recorded on the grid when it bites.
+    MAX_DIMENSION: ClassVar[int] = 256
+
+    @classmethod
+    def _clamp(cls, width: int, height: int) -> tuple[int, int, tuple[int, int] | None]:
+        limit = cls.MAX_DIMENSION
+        if width <= limit and height <= limit:
+            return width, height, None
+        return min(width, limit), min(height, limit), (width, height)
 
     # -- access ------------------------------------------------------------
 
@@ -435,6 +455,15 @@ class _Grid:
         return len(self.cells)
 
     def row(self, y: int) -> list[int]:
+        """One row of cells. Empty for a zero-width map rather than raising.
+
+        A ``DIM`` of ``0xN`` is malformed but reachable, and callers that walk
+        every row -- the inspect renderer among them -- must not blow up on it.
+        """
+        if self.width == 0:
+            if not 0 <= y < self.height:
+                raise IndexError(f"row {y} is outside a {self.width}x{self.height} map")
+            return []
         start = self.index(0, y)
         return self.cells[start : start + self.width]
 
@@ -463,7 +492,19 @@ class _Grid:
         section round-trips byte-exactly even when short or odd. ``normalize``
         emits the full ``width * height`` grid instead -- which is what Chkdraft
         always does, turning a short input into a padded output (SPEC 8.3).
+
+        A grid merged from duplicate sections cannot be written back to one
+        section without either losing cells or rewriting bytes the caller did
+        not touch, so that case requires ``normalize=True`` and an explicit
+        decision about the now-redundant duplicates.
         """
+        if self.merged_sections > 1 and not normalize:
+            raise ValueError(
+                f"this grid merges {self.merged_sections} duplicate "
+                f"{self.SECTION} sections, so it does not correspond to any one "
+                "of them; call to_bytes(normalize=True) and replace the "
+                "duplicates with a single section"
+            )
         packed = self._pack(self.cells)
         return packed if normalize else _splice(self.raw, packed)
 
@@ -491,20 +532,23 @@ class TileGrid(_Grid):
     SECTION: ClassVar[str] = "MTXM"
 
     @classmethod
-    def from_section(cls, section: Section, width: int, height: int) -> "TileGrid":
+    def from_section(cls, section: Section, width: int, height: int,
+                     *, data: bytes | None = None, merged: int = 1) -> "TileGrid":
         raw = section.data
-        whole = len(raw) // 2
-        cells = list(struct.unpack_from(f"<{whole}H", raw)) if whole else []
-        if len(raw) % 2:
+        source = raw if data is None else data
+        width, height, clamped = cls._clamp(width, height)
+        wanted = width * height
+        # Unpack only what the grid can hold. A section far larger than the map
+        # would otherwise be fully materialised and then thrown away.
+        whole = min(len(source) // 2, wanted)
+        cells = list(struct.unpack_from(f"<{whole}H", source)) if whole else []
+        if len(source) % 2 and len(cells) < wanted:
             # A lone trailing byte becomes the low half of one more tile, which
             # is what the game does with it.
-            cells.append(raw[-1])
-        wanted = width * height
+            cells.append(source[-1])
         if len(cells) < wanted:
             cells.extend([0] * (wanted - len(cells)))
-        elif len(cells) > wanted:
-            cells = cells[:wanted]
-        return cls(cells, width, height, raw, section)
+        return cls(cells, width, height, raw, section, clamped, merged)
 
     def _pack(self, cells: list[int]) -> bytes:
         return struct.pack(f"<{len(cells)}H", *cells)
@@ -542,15 +586,16 @@ class FogGrid(_Grid):
     SECTION: ClassVar[str] = "MASK"
 
     @classmethod
-    def from_section(cls, section: Section, width: int, height: int) -> "FogGrid":
+    def from_section(cls, section: Section, width: int, height: int,
+                     *, data: bytes | None = None, merged: int = 1) -> "FogGrid":
         raw = section.data
-        cells = list(raw)
+        source = raw if data is None else data
+        width, height, clamped = cls._clamp(width, height)
         wanted = width * height
+        cells = list(source[:wanted])
         if len(cells) < wanted:
             cells.extend([0] * (wanted - len(cells)))
-        elif len(cells) > wanted:
-            cells = cells[:wanted]
-        return cls(cells, width, height, raw, section)
+        return cls(cells, width, height, raw, section, clamped, merged)
 
     def _pack(self, cells: list[int]) -> bytes:
         return bytes(cells)
@@ -562,19 +607,57 @@ class FogGrid(_Grid):
         return bool(self.get(x, y) & (1 << player))
 
 
+def _merge_override(payloads: list[bytes]) -> bytes:
+    """Apply the ``Override`` duplicate-section policy (SPEC 1.5).
+
+    Each later instance patches the **prefix**; a longer earlier instance keeps
+    its tail. Chkdraft's main parser, bw-chk and openbw all agree on this for
+    ``MTXM``, and it is the single most common terrain-protection trick, so
+    last-wins visibly corrupts protected maps by zeroing everything past the
+    short patch. (Chkdraft's *other* parser, ``lite_scenario.cpp``, fully
+    replaces and is the outlier.)
+    """
+    merged = bytearray()
+    for payload in payloads:
+        if len(payload) >= len(merged):
+            merged = bytearray(payload)
+        else:
+            merged[: len(payload)] = payload
+    return bytes(merged)
+
+
+#: Sections whose duplicates patch the prefix rather than replacing outright.
+_OVERRIDE_SECTIONS = frozenset({"MTXM"})
+
+
 def terrain_for(chk: Chk, name: str = "MTXM") -> TileGrid | FogGrid | None:
     """Return a terrain grid sized from the map's ``DIM``, or ``None``.
 
     ``DIM`` is what gives the grid its shape; the section only supplies cells.
     Without dimensions a grid cannot be indexed, so this returns ``None`` rather
     than guessing a shape.
+
+    Duplicate ``MTXM`` sections are merged under the ``Override`` policy rather
+    than resolved last-wins, because that is what the game sees. The resulting
+    grid records ``merged_sections`` and refuses to serialize back onto a single
+    section without an explicit ``normalize=True``.
     """
-    section = chk.last(name)
+    sections = chk.find(name)
     dimensions = view_for(chk, "DIM")
-    if section is None or dimensions is None:
+    if not sections or dimensions is None:
         return None
-    grid_cls = FogGrid if section.key == b"MASK" else TileGrid
-    return grid_cls.from_section(section, dimensions.tile_width, dimensions.tile_height)
+    grid_cls = FogGrid if sections[-1].key == b"MASK" else TileGrid
+
+    data = None
+    merged = 1
+    if len(sections) > 1 and name.strip() in _OVERRIDE_SECTIONS:
+        data = _merge_override([s.data for s in sections])
+        merged = len(sections)
+
+    return grid_cls.from_section(
+        sections[-1], dimensions.tile_width, dimensions.tile_height,
+        data=data, merged=merged,
+    )
 
 
 # ---------------------------------------------------------------------------

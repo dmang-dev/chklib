@@ -292,11 +292,24 @@ def render(chk: Chk, *, source: str | None = None) -> str:
         grid = terrain_for(chk, name)
         if grid is None:
             continue
+        addressable = grid.width * grid.height
         notes = []
         if grid.is_short:
-            notes.append(f"short: {grid.stored_cells} of {grid.width * grid.height} cells")
+            notes.append(f"short: {grid.stored_cells} of {addressable} cells")
+        if grid.stored_cells > addressable:
+            # Without this, a malformed DIM makes a full section render as an
+            # empty grid with nothing to say that its content exists at all.
+            notes.append(
+                f"{grid.stored_cells - addressable} cells beyond the map are "
+                "not addressable"
+            )
         if grid.has_odd_tail:
             notes.append("odd trailing byte")
+        if grid.clamped_dimensions:
+            declared = "x".join(str(v) for v in grid.clamped_dimensions)
+            notes.append(f"DIM declared {declared}, clamped")
+        if grid.merged_sections > 1:
+            notes.append(f"merged from {grid.merged_sections} sections")
         summary = f"{name}  {grid.width}x{grid.height}"
         if isinstance(grid, TileGrid):
             summary += f"  {len(grid.groups())} megatile groups"
