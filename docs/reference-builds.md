@@ -92,25 +92,32 @@ Windows SDK 10.0.22000, Rust 1.96.0, Python 3.13.14, Flutter 3.44.8.
 
 | Project | Configure | Build | Tests | Runs |
 |---|---|---|---|---|
-| Chkdraft | ok | ok, 0 errors | **70/71** | yes |
+| Chkdraft | ok | ok, 0 errors | **71/71** with `SC_ASSET` | yes |
 | eudplib (source) | — | ok | 65/65 maps parsed | yes |
 | euddraft | — | ok | CLI ok | yes |
 | starcraft_map_editor | ok | ok, 121.7s | **378/378** | yes |
 
 ## Chkdraft
 
-`Chkdraft.exe`, 7.2 MB. Launches; with no StarCraft installation present it opens a
-data-file browse prompt, which is correct behaviour — it needs `StarDat.mpq` /
-`BrooDat.mpq` / `patch_rt.mpq` to render anything.
+`Chkdraft.exe`, 7.2 MB. Launches; with no StarCraft data configured it opens a data-file
+browse prompt, which is correct behaviour — it needs `StarDat.mpq` / `BrooDat.mpq` /
+`patch_rt.mpq` to render anything. A 1.16.1 install carrying all three lives at
+**`I:\Blizzard\StarCraft`**; the test suite finds them via `SC_ASSET`:
 
-Test suites: CrossCut 36/36, Chkdraft 4/4, Windows 1/1, MappingCore 29/30.
+```powershell
+$env:SC_ASSET = "I:\Blizzard\StarCraft"
+```
 
-The single failure is **`MiniMapTest.MiniMapTest`**, and it is an upstream test bug
-rather than a defect in the editor. `TestAssets::LoadScData()` reads the `SC_ASSET`
-environment variable and returns `false` immediately when it is unset
-(`test/mapping_core/test_assets.cpp`). `MiniMapTest` ignores that return value and
-uses the still-empty `Sc::Data`, so the test dies on an access violation
-(SEH `0xc0000005`) instead of skipping:
+Test suites with `SC_ASSET` set: CrossCut 36/36, Chkdraft 4/4, Windows 1/1,
+MappingCore 30/30 — everything green. Without it, MappingCore is 29 passed / 1 skipped.
+
+### The `MiniMapTest` crash *(found here, fixed upstream)*
+
+The first build of this repo was made before the StarCraft install was located, and
+`MiniMapTest.MiniMapTest` failed with an access violation (SEH `0xc0000005`). It was an
+upstream test bug rather than a defect in the editor. `TestAssets::LoadScData()` returns
+`false` immediately when `SC_ASSET` is unset (`test/mapping_core/test_assets.cpp`), and
+`MiniMapTest` ignored that return value and used the still-empty `Sc::Data`:
 
 ```cpp
 Sc::Data scData {};
@@ -118,8 +125,12 @@ TestAssets::LoadScData(scData);   // returns false when SC_ASSET is unset
 // ... proceeds to use scData regardless
 ```
 
-A `GTEST_SKIP()` on a false return would fix it. Anyone without a StarCraft install
-sees this failure; it says nothing about map-editing correctness.
+Fixed in [PR #356](https://github.com/TheNitesWhoSay/Chkdraft/pull/356) by guarding the
+call and `GTEST_SKIP()`-ing with a message naming the variable and the three data files.
+
+Worth keeping in mind for any future contribution here: the failure said nothing about
+map-editing correctness, and it would have been easy to mistake for one. It is purely an
+artefact of running the suite unconfigured — which is exactly what a newcomer does.
 
 ## eudplib — conformance run against the sc64 corpus
 

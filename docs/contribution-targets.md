@@ -2,13 +2,31 @@
 
 Triaged 2026-08-26 against Chkdraft (100 open issues) and ChkForge (38). Ratings are
 about how well the work suits an AI-assisted loop: a written spec, a self-contained
-change, and a way to tell whether it worked without a StarCraft install.
+change, and an objective way to tell whether it worked.
 
 Everything below was checked against the actual source, not inferred from issue titles.
 
-## Tier 1 — verifiable without a StarCraft install
+## Test environment
 
-These are the good ones. Each has an objective pass/fail signal.
+A StarCraft 1.16.1 install is available at **`I:\Blizzard\StarCraft`**, carrying all
+three data files Chkdraft's tests look for — `StarDat.mpq`, `BrooDat.mpq` and
+`patch_rt.mpq`. Point the test suite at it with:
+
+```powershell
+$env:SC_ASSET = "I:\Blizzard\StarCraft"
+```
+
+With it set, `MappingCoreTest` is 30/30 and `MiniMapTest` runs its full comparison
+across all 25 map dimensions in ~720 ms.
+
+This matters for triage: the original split below was drawn around whether a fix could
+be verified *without* game data. That constraint is gone, so the Tier 2 items are now
+just as verifiable as Tier 1 — they are separated only by how much UI interaction the
+verification needs.
+
+## Tier 1 — verifiable from the test suite alone
+
+These are the good ones. Each has an objective pass/fail signal with no UI in the loop.
 
 ### Chkdraft: `MiniMapTest` crashes instead of skipping *(no issue filed — found here)*
 
@@ -17,8 +35,14 @@ immediately when `SC_ASSET` is unset, and `mini_map_test.cpp` uses the still-emp
 `Sc::Data` regardless, so it access-violates (SEH `0xc0000005`). Anyone without a
 StarCraft install sees a failing suite.
 
-Fix: check the return and `GTEST_SKIP()`. Verification: the suite goes 70/71 → 71/71.
-Good first PR — small, obviously correct, and it fixes the newcomer experience.
+Fix: check the return and `GTEST_SKIP()`.
+
+**Done — [PR #356](https://github.com/TheNitesWhoSay/Chkdraft/pull/356), open against
+`development`.** Verified in all three states: `SC_ASSET` unset skips and the suite exits
+0; `SC_ASSET` set but wrong still fails loudly, because `LoadScData`'s own `EXPECT_TRUE`
+records a failure before returning; `SC_ASSET` set to the real install runs the full
+comparison and passes, 30/30. That last case is what proves the guard does not mask the
+test where it is meant to run.
 
 ### Chkdraft #198 — Open Map dialog defaults to "StarCraft Maps"
 
@@ -50,9 +74,11 @@ Two independent breakages, both reproduced here:
 
 Fix is a README note plus a lock refresh. Verification: clone clean, build, done.
 
-## Tier 2 — needs a StarCraft install to verify
+## Tier 2 — verification needs the running editor
 
-Tractable, but do not attempt them blind.
+Tractable, and no longer blocked on game data now that `I:\Blizzard\StarCraft` is
+available. What separates these from Tier 1 is that confirming the fix means driving
+Chkdraft's UI rather than reading a test result.
 
 - **Chkdraft #204** — Windows error beep on number-key player switching. `gui_map.cpp:3019`
   already has `case WM_CHAR: return 0;`, so the beep comes from a *different* window that
@@ -61,9 +87,14 @@ Tractable, but do not attempt them blind.
 - **Chkdraft #303 / #130** — case- and special-character-insensitive search. Self-contained
   string work; verification is interactive.
 - **Chkdraft #84** — Find/Replace in the string editor. Well-understood feature, UI-heavy.
-- **Chkdraft #349** — minimap unit draw order. Connects to the failing test above:
-  `mini_map_test.cpp` carries a `// TODO: Minimap unit draw order needs to be fixed, then
-  the test data can be rebuilt`. Fixing the order means regenerating test fixtures.
+- **Chkdraft #349** — minimap unit draw order. `mini_map_test.cpp` carries a
+  `// TODO: Minimap unit draw order needs to be fixed, then the test data can be rebuilt
+  accounting for that & multiple player colors can be used`. So the fix and its test data
+  move together: `miniMapPixels` in `mini_map_test_data.h` is a golden-image baseline that
+  has to be regenerated, and the test currently uses a single player colour to sidestep the
+  bug. Verifiable end to end now that `SC_ASSET` works — but changing a golden baseline
+  means the maintainer has to trust the new one, so agree the expected order on the issue
+  first.
 
 ## Tier 3 — the strategic one
 

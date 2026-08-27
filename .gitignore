@@ -24,3 +24,6 @@ desktop.ini
 
 # Test fixtures extracted from real (copyrighted) maps
 tests/fixtures/
+
+# Research scratch for the typed-views spec
+.research/
