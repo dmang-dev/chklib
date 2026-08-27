@@ -26,7 +26,7 @@ from .records import Action, Condition, Location, Sprite, Trigger, Unit
 __all__ = [
     "Dimensions", "PlayerSlots", "PlayerRaces", "ScenarioProperties", "Forces",
     "Version", "TilesetRef", "RecordArrayView", "TriggerListView",
-    "StringTableView", "view_for", "TYPED_SECTIONS",
+    "StringTableView", "StringTable", "view_for", "TYPED_SECTIONS",
 ]
 
 _U16 = struct.Struct("<H")
@@ -465,6 +465,163 @@ class StringTableView:
 
     def __len__(self) -> int:
         return self.count
+
+
+@dataclass(slots=True)
+class StringTable:
+    """A mutable string table, for building a ``STR`` section.
+
+    :class:`StringTableView` reads; this writes. Editing a map's name, its
+    description, a location name or any trigger text means changing a string, so
+    without this the library can inspect a map but not meaningfully edit one.
+
+    Ids are 1-based and **positional**: id 7 is referenced as 7 from ``SPRP``,
+    ``MRGN``, ``FORC``, ``TRIG`` and elsewhere. Gaps are therefore preserved
+    rather than compacted, because renumbering would silently repoint every
+    reference in the map.
+
+    Two limits matter, and getting them wrong corrupts maps silently:
+
+    ``STR`` offsets are ``u16``, so nothing past byte 65535 is addressable.
+    Chkdraft's own guard under-counts by one byte per string -- it sums string
+    lengths without the terminating NUL that its writer then emits -- so it
+    accepts payloads slightly over the limit and writes offsets that wrap modulo
+    65536, producing a corrupt map with no error. :meth:`to_bytes` counts the
+    NULs and raises instead.
+
+    The offset table alone occupies ``2 + 2N`` bytes, so ``N > 32766`` makes the
+    string data unreachable no matter how it is packed. That is a derived
+    reachability bound rather than a stated format limit -- the sources give four
+    different ceilings across five orders of magnitude -- so it is enforced here
+    deliberately and named, not inherited.
+    """
+
+    strings: dict[int, bytes] = field(default_factory=dict)
+    """Present strings by 1-based id. An absent id means "no string"."""
+
+    declared_count: int = 0
+    """What to write as ``numStrings``. Real maps declare 1024 regardless of use."""
+
+    tail: bytes = b""
+    """Bytes found after the string data.
+
+    Chkdraft parses these, logs that the map is "most likely a compiled EUD map",
+    and then never writes them back -- the one place it destroys data it read
+    successfully. They are carried through here instead. No corpus map has any,
+    so this path is unverified; preserving unknown bytes is still strictly better
+    than dropping them.
+    """
+
+    #: Largest byte offset a ``u16`` offset field can name.
+    MAX_OFFSET: ClassVar[int] = 0xFFFF
+    #: Beyond this the offset table alone fills the addressable space.
+    MAX_IDS: ClassVar[int] = 32766
+
+    @classmethod
+    def from_view(cls, view: StringTableView) -> "StringTable":
+        """Copy a parsed table into an editable one."""
+        present = {}
+        for string_id in range(1, view.count + 1):
+            value = view.get(string_id)
+            if value:
+                present[string_id] = value
+        return cls(present, max(view.declared_count, view.count))
+
+    # -- editing -----------------------------------------------------------
+
+    def get(self, string_id: int) -> bytes | None:
+        return self.strings.get(string_id)
+
+    def set(self, string_id: int, value: bytes | str) -> None:
+        """Replace or create ``string_id``. Setting ``b""`` removes it."""
+        if string_id < 1:
+            raise ValueError("string ids are 1-based; 0 means 'no string'")
+        raw = value.encode("cp1252") if isinstance(value, str) else bytes(value)
+        if raw:
+            self.strings[string_id] = raw
+            self.declared_count = max(self.declared_count, string_id)
+        else:
+            self.strings.pop(string_id, None)
+
+    def add(self, value: bytes | str) -> int:
+        """Store ``value`` at the lowest free id and return it."""
+        string_id = 1
+        while string_id in self.strings:
+            string_id += 1
+        self.set(string_id, value)
+        return string_id
+
+    def __getitem__(self, string_id: int) -> bytes | None:
+        return self.get(string_id)
+
+    def __setitem__(self, string_id: int, value: bytes | str) -> None:
+        self.set(string_id, value)
+
+    def __len__(self) -> int:
+        return len(self.strings)
+
+    # -- writing -----------------------------------------------------------
+
+    def to_bytes(self, *, dedupe: bool = False) -> bytes:
+        """Serialize a ``STR`` section.
+
+        Unused slots point at a single shared NUL placed immediately after the
+        offset table, which is what StarEdit and Chkdraft both emit.
+
+        ``dedupe`` points equal strings at one offset. That is legal -- readers
+        scan forward to the next NUL, so sharing is exactly the format's
+        documented "duplicate recycling" -- but no writer in the reference set
+        produces it, so it is off by default rather than risking a tool that
+        assumes otherwise.
+        """
+        count = max(self.declared_count, max(self.strings, default=0))
+        if count > self.MAX_IDS:
+            raise ValueError(
+                f"{count} string ids exceeds the reachable maximum of "
+                f"{self.MAX_IDS}: the offset table alone would occupy "
+                f"{2 + 2 * count} bytes of a {self.MAX_OFFSET + 1}-byte "
+                f"addressable space"
+            )
+
+        header_size = 2 + 2 * count
+        # Count the terminating NUL for every string. Omitting it is the exact
+        # arithmetic slip that lets Chkdraft emit wrapped offsets.
+        payload = sum(len(v) + 1 for v in self.strings.values())
+        total = header_size + 1 + payload  # +1 for the shared NUL
+        if total - 1 > self.MAX_OFFSET:
+            raise ValueError(
+                f"string table needs {total} bytes but STR offsets are 16-bit, "
+                f"so nothing past byte {self.MAX_OFFSET} can be addressed; "
+                f"remove or shorten strings"
+            )
+
+        offsets = [header_size] * count  # default: the shared NUL
+        data = bytearray(b"\x00")
+        seen: dict[bytes, int] = {}
+        for string_id in sorted(self.strings):
+            value = self.strings[string_id]
+            if dedupe and value in seen:
+                offsets[string_id - 1] = seen[value]
+                continue
+            offset = header_size + len(data)
+            offsets[string_id - 1] = offset
+            seen[value] = offset
+            data += value + b"\x00"
+
+        # Belt and braces: a bug in the arithmetic above must not reach a file.
+        for string_id, offset in enumerate(offsets, start=1):
+            if offset > self.MAX_OFFSET:
+                raise ValueError(
+                    f"string {string_id} would sit at byte {offset}, past the "
+                    f"16-bit offset limit"
+                )
+
+        return (
+            _U16.pack(count)
+            + b"".join(_U16.pack(o) for o in offsets)
+            + bytes(data)
+            + self.tail
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ from .views import (
     PlayerSlots,
     RecordArrayView,
     ScenarioProperties,
+    StringTable,
     StringTableView,
     TilesetRef,
     TriggerListView,
@@ -25,6 +26,6 @@ __all__ = [
     # views
     "Dimensions", "Version", "TilesetRef", "PlayerSlots", "PlayerRaces",
     "ScenarioProperties", "Forces", "RecordArrayView", "TriggerListView",
-    "StringTableView", "view_for", "TYPED_SECTIONS",
+    "StringTableView", "StringTable", "view_for", "TYPED_SECTIONS",
 ]
 __version__ = "0.0.2"

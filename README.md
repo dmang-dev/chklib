@@ -3,10 +3,10 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: working end to end.** Container, typed views, MPQ reading *and writing*,
-`chkdiff inspect`, `chkdiff diff`, `pack`/`unpack`, and the git integration are all
-implemented and tested. `git diff` on a `.scx` shows what actually changed in the map,
-and maps can be read, edited and saved back.
+**Status: working end to end.** Container, typed views, string-table editing, MPQ
+reading *and* writing, `chkdiff inspect`, `chkdiff diff`, `pack`/`unpack`, and the git
+integration are all implemented and tested. A map can be opened, edited — including its
+name, description and any trigger text — and saved back to a playable archive.
 
 ## Why
 
@@ -187,6 +187,45 @@ a later one, and you get:
 The `6->7` records that the trigger both moved and changed. It degrades gracefully: below
 the similarity threshold a replacement is reported as an add plus a remove, which is
 correct, just less informative.
+
+## Editing
+
+```python
+from openstaredit import Chk, StringTable
+from openstaredit.mpq import MpqArchive, write_scenario, SCENARIO_PATH
+from openstaredit.views import view_for
+
+chk = Chk.from_bytes(MpqArchive(open("map.scm", "rb").read()).read_file(SCENARIO_PATH))
+
+# terrain, players, units, triggers - edit the typed view, write it back
+view_for(chk, "ERA").value = 4
+chk.replace_section("ERA", view_for(chk, "ERA").to_bytes())
+
+# strings - the map name, description, location names and all trigger text
+strings = StringTable.from_view(view_for(chk, "STR"))
+strings[view_for(chk, "SPRP").name_string_id] = "Blood Bath (Remix)"
+new_id = strings.add("a string that did not exist before")
+chk.replace_section("STR", strings.to_bytes())
+
+open("edited.scx", "wb").write(write_scenario(chk.to_bytes(), compress=True))
+```
+
+`StringTableView` reads; `StringTable` writes. Two things about it are load-bearing:
+
+**String ids are positional and gaps are preserved.** Id 7 is referenced as 7 from
+`SPRP`, `MRGN`, `FORC` and every trigger, so compacting the table would silently repoint
+every reference in the map without touching a single trigger.
+
+**Offsets are 16-bit, and the limit is enforced honestly.** Chkdraft's own guard sums
+string lengths *without* the terminating NUL its writer then emits, so it accepts
+payloads a little over 64 KB and writes offsets that wrap modulo 65536 — a corrupt map
+with no error raised. This counts the NULs and raises instead. The id ceiling (32766) is
+likewise derived from the offset table filling the addressable space, and named as such
+rather than inherited: the sources give four different ceilings across five orders of
+magnitude, none of which is a format limit.
+
+Rebuilding the string table of all 65 corpus maps preserves every string at its own id,
+and a rename leaves every location name still resolving.
 
 ## Reading map files
 

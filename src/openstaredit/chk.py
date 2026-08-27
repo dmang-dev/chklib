@@ -211,6 +211,32 @@ class Chk:
         """Serialize. Round-trips byte-exactly if nothing has been modified."""
         return b"".join(s.to_bytes() for s in self.sections) + self.trailing
 
+    def replace_section(self, name: str | bytes, data: bytes) -> Section:
+        """Replace the payload of the *effective* section ``name``.
+
+        The effective section is the last one with that name, matching the
+        override order StarCraft applies. Earlier duplicates are left alone --
+        they are still what the file contained, and collapsing them would be a
+        silent edit.
+
+        Returns the new :class:`Section`. Raises :class:`KeyError` if absent.
+        """
+        wanted = _normalize(name)
+        for index in range(len(self.sections) - 1, -1, -1):
+            section = self.sections[index]
+            if section.name == wanted:
+                replacement = Section(wanted, len(data), bytes(data), section.offset)
+                self.sections[index] = replacement
+                return replacement
+        raise KeyError(f"no {wanted!r} section to replace")
+
+    def add_section(self, name: str | bytes, data: bytes) -> Section:
+        """Append a new section. Its offset is recorded as the current end."""
+        wanted = _normalize(name)
+        section = Section(wanted, len(data), bytes(data), len(self.to_bytes()))
+        self.sections.append(section)
+        return section
+
     # -- lookup -----------------------------------------------------------
 
     def find(self, name: str | bytes) -> list[Section]:
