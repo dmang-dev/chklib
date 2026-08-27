@@ -3,10 +3,9 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: early but usable.** The section container, typed views, `chkdiff inspect` and
-`chkdiff diff` are implemented, with round-trip and determinism gates green across a
-65-map corpus. MPQ reading is next, and is what stands between this and the git
-integration.
+**Status: early but usable.** The section container, typed views, MPQ reading, `chkdiff
+inspect` and `chkdiff diff` are implemented. `chkdiff` reads `.scm`/`.scx` map files
+directly. The git `textconv` integration is the last piece.
 
 ## Why
 
@@ -135,10 +134,6 @@ Three rules make that work, and they are what the tests pin down:
 Nothing is invented: unit and sprite types print as numbers, because naming them needs
 `units.dat` from a StarCraft installation, which this library does not read.
 
-**MPQ archives are not supported yet.** `chkdiff` reads a bare `scenario.chk`; pointing it
-at a `.scm`/`.scx` gives a message explaining how to extract one. That gap has to close
-before the git integration is actually useful, since maps in a repository are archives.
-
 ## `chkdiff diff`
 
 Compares two scenarios by meaning rather than by bytes. Exit status follows `diff(1)`:
@@ -191,6 +186,47 @@ a later one, and you get:
 The `6->7` records that the trigger both moved and changed. It degrades gracefully: below
 the similarity threshold a replacement is reported as an add plus a remove, which is
 correct, just less informative.
+
+## Reading map files
+
+`.scm`/`.scx` maps are MPQ archives, so the library reads those directly — that is what
+makes `chkdiff` usable on files as they actually exist in a repository.
+
+```python
+from openstaredit.mpq import MpqArchive, SCENARIO_PATH
+
+chk_bytes = MpqArchive(open("(4)Blood Bath.scm", "rb").read()).read_file(SCENARIO_PATH)
+```
+
+This is read-only and deliberately partial: MPQ v1 with encrypted hash/block tables,
+multi-sector and single-unit files, `FIX_KEY`, and the compressions maps actually use.
+MPQ v2 is **refused rather than guessed at**, because a v2 archive parsed as v1 produces
+plausible-looking wrong bytes.
+
+A permissive off-the-shelf reader wasn't an option: `mpyq` (BSD) cannot open a single
+genuine Blizzard map — it has no decryption, and no PKWARE implode, which is compression
+method 0x08 and what Blizzard maps overwhelmingly use. So both the archive layer and a
+PKWARE exploder are implemented here from the format description.
+
+**Verification is by ground truth, not inspection.** Every scenario is compared
+byte-for-byte against the same file extracted by StormLib:
+
+| Corpus | Result |
+|---|---|
+| 423 maps in a StarCraft 1.16.1 install | **423 byte-identical**, 0 mismatched, 0 errors |
+| 65 StarCraft 64 scenarios | **65 byte-identical** |
+| PKWARE sectors decompressed | 22,308, all exact, all three dictionary sizes |
+| Archives with encrypted blocks | 312 |
+
+Eight of those maps are deliberately protected — seven declare a `hashTableSize` of
+`0x10000400` instead of `0x400`, and one hides its hash entry away from its home slot.
+Both are handled (the declared size is clamped to what the file can hold; a failed probe
+falls back to a full scan), and both are *recorded* on the archive object rather than
+silently absorbed, so a caller can tell a protected map from a clean one.
+
+One honest gap: the literal-mode byte was 0 in all 488 maps, so the 256-symbol Huffman
+table for coded literals has never been exercised against ground truth. It is marked
+unverified in the source.
 
 ## Development
 

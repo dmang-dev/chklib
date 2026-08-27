@@ -354,13 +354,25 @@ def test_cli_diff_missing_file(tmp_path: pathlib.Path) -> None:
         main(["diff", str(a), str(tmp_path / "nope.chk")])
 
 
-def test_cli_diff_rejects_mpq(tmp_path: pathlib.Path) -> None:
+def test_cli_diff_reads_map_archives_directly() -> None:
+    """diff takes .scm/.scx, which is what makes it usable on a repository."""
+    import glob
+
+    maps = sorted(glob.glob(r"I:\projects\sc64-maps\gamedata\maps\*.scm"))
+    if len(maps) < 2:
+        pytest.skip("need two map archives")
+    assert main(["diff", maps[0], maps[0]]) == 0   # identical
+    assert main(["diff", maps[0], maps[1]]) == 1   # different
+
+
+def test_cli_diff_reports_an_unreadable_archive(tmp_path: pathlib.Path) -> None:
     a = _write(tmp_path, "a.chk", build())
     mpq = tmp_path / "b.scx"
-    mpq.write_bytes(b"MPQ\x1a" + bytes(100))
+    mpq.write_bytes(b"MPQ" + bytes(100))
     with pytest.raises(SystemExit) as excinfo:
         main(["diff", str(a), str(mpq)])
-    assert "MPQ archive" in str(excinfo.value)
+    assert str(mpq) in str(excinfo.value)
+
 
 
 def test_broken_pipe_is_handled(tmp_path: pathlib.Path, monkeypatch) -> None:

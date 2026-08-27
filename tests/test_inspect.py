@@ -13,6 +13,7 @@ small change in the text. That is what the ordering rules in
 from __future__ import annotations
 
 import difflib
+import glob
 import pathlib
 import struct
 
@@ -266,14 +267,24 @@ def test_cli_stable_omits_the_path(tmp_path: pathlib.Path, capsys) -> None:
     assert str(path) not in out
 
 
-def test_cli_rejects_mpq_with_a_useful_message(tmp_path: pathlib.Path) -> None:
+def test_cli_reads_a_real_map_archive(capsys) -> None:
+    """The CLI takes a .scm/.scx directly, not just a bare scenario.chk."""
+    maps = sorted(glob.glob(r"I:\projects\sc64-maps\gamedata\maps\*.scm"))
+    if not maps:
+        pytest.skip("no map archives available")
+    assert main(["inspect", "--stable", maps[0]]) == 0
+    out = capsys.readouterr().out
+    assert "# openstaredit inspect" in out
+    assert "[map]" in out
+
+
+def test_cli_reports_an_unreadable_archive_clearly(tmp_path: pathlib.Path) -> None:
+    """A truncated archive must name the problem, not raise something opaque."""
     path = tmp_path / "map.scx"
     path.write_bytes(b"MPQ\x1a" + bytes(200))
     with pytest.raises(SystemExit) as excinfo:
         main(["inspect", str(path)])
-    message = str(excinfo.value)
-    assert "MPQ archive" in message
-    assert "extract_fixtures" in message
+    assert str(path) in str(excinfo.value)
 
 
 def test_cli_missing_file(tmp_path: pathlib.Path) -> None:

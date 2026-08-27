@@ -14,33 +14,22 @@ from . import __version__
 from .chk import Chk
 from .diff import diff
 from .inspect import FORMAT_VERSION, render
+from .mpq import MpqArchive, MpqError, SCENARIO_PATH, looks_like_mpq
 
 __all__ = ["main"]
 
-MPQ_MAGICS = (b"MPQ\x1a", b"MPQ\x1b")
-
-_MPQ_HELP = """\
-{path} is an MPQ archive ({ext}), not a raw scenario.chk.
-
-This library does not read MPQ archives yet, so the scenario has to be extracted
-first. Any of these work:
-
-  python tools/extract_fixtures.py "{path}"     # needs the 'fixtures' extra
-  # or open the map in an editor and export staredit\\scenario.chk
-
-MPQ support is the next thing needed before the git integration is useful, since
-map files in a repository are archives, not bare CHKs.\
-"""
-
-
-def _looks_like_mpq(raw: bytes) -> bool:
-    return raw[:4] in MPQ_MAGICS
-
-
 def _load(path: pathlib.Path) -> Chk:
+    """Read a bare ``scenario.chk``, or pull one out of a ``.scm``/``.scx``.
+
+    Map files in a repository are MPQ archives, so accepting them directly is
+    what makes the git integration possible at all.
+    """
     raw = path.read_bytes()
-    if _looks_like_mpq(raw):
-        raise SystemExit(_MPQ_HELP.format(path=path, ext=path.suffix or "no suffix"))
+    if looks_like_mpq(raw):
+        try:
+            raw = MpqArchive(raw).read_file(SCENARIO_PATH)
+        except MpqError as exc:
+            raise SystemExit(f"{path}: {exc}") from exc
     return Chk.from_bytes(raw)
 
 
