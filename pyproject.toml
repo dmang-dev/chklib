@@ -9,6 +9,7 @@ description = "Read/write library for StarCraft map data (CHK), with a diff-orie
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+license-files = ["LICENSE"]
 dependencies = []
 
 [project.scripts]
