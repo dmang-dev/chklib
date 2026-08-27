@@ -44,6 +44,7 @@ from .views import (
     Dimensions,
     Forces,
     StringTableView,
+    string_table_for,
     view_for,
 )
 
@@ -190,7 +191,7 @@ def render(chk: Chk, *, source: str | None = None) -> str:
     if source is not None:
         out.append(f"# source {source}")
 
-    strings = view_for(chk, "STR")
+    strings = string_table_for(chk)
     dim: Dimensions | None = view_for(chk, "DIM")
     version = view_for(chk, "VER")
     era = view_for(chk, "ERA")

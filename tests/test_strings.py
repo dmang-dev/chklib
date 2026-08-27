@@ -25,7 +25,7 @@ import struct
 import pytest
 
 from openstaredit import Chk, StringTable
-from openstaredit.views import StringTableView, view_for
+from openstaredit.views import StringTableView, string_table_for, view_for
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -281,3 +281,155 @@ def test_renaming_a_map_leaves_other_references_intact() -> None:
     after = view_for(chk, "STR")
     assert after.get(sprp.name_string_id) == b"A Completely New Name"
     assert {sid: after.get(sid) for sid in locations} == named_before
+
+
+# --------------------------------------------------------------------------
+# STRx - the Remastered 32-bit table
+# --------------------------------------------------------------------------
+
+
+def parse_wide(payload: bytes) -> StringTableView:
+    return view_for(Chk.from_bytes(sect(b"STRx", payload)), "STRx")
+
+
+def test_strx_is_str_with_32_bit_fields() -> None:
+    table = StringTable()
+    table[1] = b"first"
+    table[2] = b"second"
+    view = parse_wide(table.to_bytes(wide=True))
+    assert view.wide
+    assert view.get(1) == b"first"
+    assert view.get(2) == b"second"
+
+
+def test_strx_header_is_four_bytes_per_entry() -> None:
+    table = StringTable(declared_count=3)
+    table[1] = b"x"
+    data = table.to_bytes(wide=True)
+    assert struct.unpack_from("<I", data, 0)[0] == 3
+    # Unused slots point at the shared NUL right after the offset table.
+    assert struct.unpack_from("<I", data, 8)[0] == 4 + 4 * 3
+
+
+def test_the_two_widths_are_not_interchangeable() -> None:
+    """Reading a STRx table as STR yields garbage, not an error.
+
+    That is exactly why the width has to be decided by the section name rather
+    than sniffed: nothing about a mis-read table announces itself. On real
+    Remastered maps the wrong width produces empty strings; on this small
+    fixture it produces a stray byte. Either way it is not the string.
+    """
+    table = StringTable()
+    table[1] = b"hello"
+    wide_bytes = table.to_bytes(wide=True)
+    assert parse_wide(wide_bytes).get(1) == b"hello"
+    assert parse(wide_bytes).get(1) != b"hello"
+
+
+def test_strx_has_no_16_bit_ceiling() -> None:
+    """A payload that STR must refuse is fine as STRx."""
+    table = StringTable()
+    for index in range(1, 40):
+        table[index] = b"x" * 2000  # ~78 KB
+    with pytest.raises(ValueError, match="16-bit"):
+        table.to_bytes()
+    view = parse_wide(table.to_bytes(wide=True))
+    assert view.get(1) == b"x" * 2000
+    assert view.get(39) == b"x" * 2000
+
+
+def test_strx_id_ceiling_is_derived_and_matches_chkdraft() -> None:
+    assert StringTable.MAX_IDS_WIDE == (0xFFFFFFFF - 4) // 4 == 1073741822
+    with pytest.raises(ValueError, match="reachable maximum"):
+        StringTable(declared_count=StringTable.MAX_IDS_WIDE + 1).to_bytes(wide=True)
+
+
+def test_strx_supersedes_str_in_either_order() -> None:
+    """Chkdraft, bw-chk and eudplib agree; blackvrice abstains and so fails to
+    open ordinary Remastered maps that kept a legacy STR."""
+    narrow = StringTable()
+    narrow[1] = b"from STR"
+    wide = StringTable()
+    wide[1] = b"from STRx"
+
+    for order in (
+        sect(b"STR ", narrow.to_bytes()) + sect(b"STRx", wide.to_bytes(wide=True)),
+        sect(b"STRx", wide.to_bytes(wide=True)) + sect(b"STR ", narrow.to_bytes()),
+    ):
+        table = string_table_for(Chk.from_bytes(order))
+        assert table.wide
+        assert table.get(1) == b"from STRx"
+
+
+def test_string_table_for_falls_back_to_str() -> None:
+    table = StringTable()
+    table[1] = b"only STR"
+    chk = Chk.from_bytes(sect(b"STR ", table.to_bytes()))
+    resolved = string_table_for(chk)
+    assert resolved is not None and not resolved.wide
+    assert resolved.get(1) == b"only STR"
+
+
+def test_string_table_for_returns_none_when_absent() -> None:
+    assert string_table_for(Chk.from_bytes(sect(b"DIM ", b"aaaa"))) is None
+
+
+# --------------------------------------------------------------------------
+# STRx against real Remastered maps
+# --------------------------------------------------------------------------
+
+import glob  # noqa: E402
+
+_INSTALLED = sorted(set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recursive=True)))
+
+
+def _strx_maps() -> list[bytes]:
+    from openstaredit.mpq import MpqArchive, SCENARIO_PATH
+
+    out = []
+    for path in _INSTALLED:
+        try:
+            raw = MpqArchive(pathlib.Path(path).read_bytes()).read_file(SCENARIO_PATH)
+        except Exception:  # noqa: BLE001
+            continue
+        if b"STRx" in raw[:64] or "STRx" in Chk.from_bytes(raw):
+            out.append(raw)
+    return out
+
+
+STRX_MAPS = _strx_maps() if _INSTALLED else []
+
+
+@pytest.mark.skipif(not STRX_MAPS, reason="no installed maps using STRx")
+def test_real_strx_maps_resolve_to_text() -> None:
+    """If the field width were wrong, every string would come back empty."""
+    from openstaredit.views import view_for as _view_for
+
+    resolved = 0
+    for raw in STRX_MAPS:
+        chk = Chk.from_bytes(raw)
+        table = string_table_for(chk)
+        assert table.wide, "a map with STRx must resolve through the wide table"
+        sprp = _view_for(chk, "SPRP")
+        name = table.get(sprp.name_string_id)
+        assert name, "scenario name did not resolve"
+        resolved += 1
+    assert resolved == len(STRX_MAPS)
+
+
+@pytest.mark.skipif(not STRX_MAPS, reason="no installed maps using STRx")
+def test_rebuilding_a_real_strx_table_preserves_every_string() -> None:
+    for raw in STRX_MAPS:
+        chk = Chk.from_bytes(raw)
+        table = string_table_for(chk)
+        before = {i: table.get(i) for i in table.used_ids()}
+        chk.replace_section("STRx", StringTable.from_view(table).to_bytes(wide=True))
+        after_view = string_table_for(chk)
+        assert {i: after_view.get(i) for i in after_view.used_ids()} == before
+
+
+@pytest.mark.skipif(not STRX_MAPS, reason="no installed maps using STRx")
+def test_no_installed_map_carries_both_tables() -> None:
+    """An empirical note: the precedence rule is real but unexercised here."""
+    both = [raw for raw in STRX_MAPS if "STR" in Chk.from_bytes(raw)]
+    assert not both, f"{len(both)} maps carry both STR and STRx"

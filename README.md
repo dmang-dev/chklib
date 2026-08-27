@@ -3,8 +3,8 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: working end to end.** Container, typed views, string-table editing, MPQ
-reading *and* writing, `chkdiff inspect`, `chkdiff diff`, `pack`/`unpack`, and the git
+**Status: working end to end.** Container, typed views, string-table editing (`STR` and
+`STRx`), MPQ reading *and* writing, `chkdiff inspect`, `chkdiff diff`, `pack`/`unpack`, and the git
 integration are all implemented and tested. A map can be opened, edited — including its
 name, description and any trigger text — and saved back to a playable archive.
 
@@ -226,6 +226,23 @@ magnitude, none of which is a format limit.
 
 Rebuilding the string table of all 65 corpus maps preserves every string at its own id,
 and a rename leaves every location name still resolving.
+
+### `STRx`
+
+Remastered maps use `STRx` — exactly `STR` with the count and every offset widened from
+`u16` to `u32`, nothing else changed. `string_table_for(chk)` returns whichever table a
+map's references actually resolve against, because **`STRx` supersedes `STR` in either
+file order** and that rule is not expressible as a section lookup. Chkdraft, bw-chk and
+eudplib agree on it; blackvrice abstains when both are present and so fails to open
+ordinary Remastered maps that kept a legacy `STR`.
+
+Verified against the 24 `STRx` maps in a real installation: every scenario name and
+description resolves, and rebuilding each table preserves every string at its id. Reading
+one of those sections at the wrong width yields empty strings rather than an error — which
+is why the width is decided by the section name and never sniffed.
+
+An empirical note the format sources don't carry: of 423 installed maps, 24 use `STRx` and
+**none uses both**, so the precedence rule is real but unexercised by those maps.
 
 ## Reading map files
 

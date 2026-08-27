@@ -61,15 +61,36 @@ def test_typed_round_trip_is_byte_exact(path: pathlib.Path) -> None:
     assert checked >= 10, f"{path.stem}: only {checked} typed sections found"
 
 
+#: Sections this corpus cannot reach, with the reason. Keeping the list explicit
+#: is the point: it stays a statement about the corpus rather than a hole in the
+#: gate, and anything that drifts into it has to be justified here.
+NOT_IN_THIS_CORPUS = {
+    # The sc64 scenarios are all VER 59/63, pre-Remastered, so they carry STR.
+    # STRx is covered instead by tests/test_strings.py against installed
+    # Remastered maps, 24 of which use it.
+    "STRx",
+}
+
+
 def test_gate_covers_every_typed_section_at_least_once() -> None:
     """Guard against a green gate that silently skipped a whole section type."""
     seen: set[str] = set()
     for path in MAPS:
         chk = load(path)
         seen.update(n for n in TYPED_SECTIONS if n in chk)
-    missing = set(TYPED_SECTIONS) - seen
-    # IOWN and STR are present in this corpus; nothing should be missing.
+    missing = set(TYPED_SECTIONS) - seen - NOT_IN_THIS_CORPUS
     assert not missing, f"never exercised: {sorted(missing)}"
+
+
+def test_the_corpus_exclusion_list_stays_honest() -> None:
+    """An excluded section must genuinely be absent, not merely assumed absent.
+
+    If one of these ever shows up, the exclusion is stale and the gate should
+    start covering it.
+    """
+    for name in NOT_IN_THIS_CORPUS:
+        present = [p.stem for p in MAPS if name in load(p)]
+        assert not present, f"{name} is in the corpus after all: {present[:3]}"
 
 
 # --------------------------------------------------------------------------

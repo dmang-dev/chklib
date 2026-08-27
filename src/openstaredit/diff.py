@@ -42,7 +42,7 @@ from .chk import Chk
 from .enums import Race, SlotType, Tileset
 from .inspect import _action_line, _condition_line, _quote, _enum_name
 from .records import Trigger
-from .views import StringTableView, view_for
+from .views import StringTableView, string_table_for, view_for
 
 __all__ = ["Change", "DiffReport", "diff", "JSON_SCHEMA_VERSION"]
 
@@ -468,8 +468,8 @@ def _diff_triggers(report: DiffReport, a: Chk, b: Chk, section: str,
 def diff(a: Chk, b: Chk) -> DiffReport:
     """Compare two scenarios semantically."""
     report = DiffReport()
-    sa: StringTableView | None = view_for(a, "STR")
-    sb: StringTableView | None = view_for(b, "STR")
+    sa: StringTableView | None = string_table_for(a)
+    sb: StringTableView | None = string_table_for(b)
 
     _diff_map(report, a, b, sa, sb)
     _diff_players(report, a, b)

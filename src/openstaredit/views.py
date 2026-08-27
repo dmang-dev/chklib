@@ -26,11 +26,13 @@ from .records import Action, Condition, Location, Sprite, Trigger, Unit
 __all__ = [
     "Dimensions", "PlayerSlots", "PlayerRaces", "ScenarioProperties", "Forces",
     "Version", "TilesetRef", "RecordArrayView", "TriggerListView",
-    "StringTableView", "StringTable", "view_for", "TYPED_SECTIONS",
+    "StringTableView", "StringTable", "view_for", "string_table_for",
+    "TYPED_SECTIONS",
 ]
 
 _U16 = struct.Struct("<H")
 _U16X2 = struct.Struct("<HH")
+_U32 = struct.Struct("<I")
 
 PIXELS_PER_TILE = 32
 
@@ -407,7 +409,13 @@ class StringTableView:
 
     Read-only on purpose: a typed write cannot reproduce the input in general,
     because writers expand compressed tables, collapse the absent/empty string
-    distinction, and drop tail data (SPEC 8.4-8.6).
+    distinction, and drop tail data (SPEC 8.4-8.6). Use :class:`StringTable` to
+    build one.
+
+    ``STRx`` (SPEC 5.2) is exactly this with the count and every offset widened
+    from ``u16`` to ``u32``, and nothing else changed -- same payload-relative
+    origin, same 1-based ids, same NUL termination, same unconstrained offsets.
+    ``wide`` selects it.
     """
 
     SECTION: ClassVar[str] = "STR"
@@ -417,19 +425,26 @@ class StringTableView:
     offsets: list[int]
     data: bytes = field(repr=False)
     section: Section | None = field(default=None, repr=False)
+    wide: bool = False
+    """True for ``STRx``, whose count and offsets are 32-bit."""
 
     @classmethod
-    def from_section(cls, section: Section) -> "StringTableView":
+    def from_section(cls, section: Section, wide: bool = False) -> "StringTableView":
         raw = section.data
-        if len(raw) < 2:
-            return cls(0, 0, [], raw, section)
-        declared = _U16.unpack(raw[:2])[0]
+        width = 4 if wide else 2
+        unpack = _U32 if wide else _U16
+        if len(raw) < width:
+            return cls(0, 0, [], raw, section, wide)
+        declared = unpack.unpack(raw[:width])[0]
         # A declared count larger than the section can physically hold is
         # clamped, not an error (SPEC 5.1 point 6).
-        capacity = max(len(raw) // 2 - 1, 0)
+        capacity = max(len(raw) // width - 1, 0)
         count = min(declared, capacity)
-        offsets = [_U16.unpack(raw[2 * i : 2 * i + 2])[0] for i in range(1, count + 1)]
-        return cls(declared, count, offsets, raw, section)
+        offsets = [
+            unpack.unpack(raw[width * i : width * (i + 1)])[0]
+            for i in range(1, count + 1)
+        ]
+        return cls(declared, count, offsets, raw, section, wide)
 
     def to_bytes(self) -> bytes:
         """The original bytes. This view never re-synthesizes a string table."""
@@ -512,10 +527,15 @@ class StringTable:
     than dropping them.
     """
 
-    #: Largest byte offset a ``u16`` offset field can name.
+    #: Largest byte offset a ``u16`` ``STR`` offset field can name.
     MAX_OFFSET: ClassVar[int] = 0xFFFF
-    #: Beyond this the offset table alone fills the addressable space.
+    #: Beyond this the ``STR`` offset table alone fills the addressable space.
     MAX_IDS: ClassVar[int] = 32766
+    #: The same two bounds for ``STRx``, whose fields are ``u32``. The id ceiling
+    #: is ``(2**32 - 1 - 4) // 4`` -- and Chkdraft's STRx writer independently
+    #: enforces exactly this number, which is reassuring for a derived bound.
+    MAX_OFFSET_WIDE: ClassVar[int] = 0xFFFFFFFF
+    MAX_IDS_WIDE: ClassVar[int] = 1073741822
 
     @classmethod
     def from_view(cls, view: StringTableView) -> "StringTable":
@@ -562,8 +582,11 @@ class StringTable:
 
     # -- writing -----------------------------------------------------------
 
-    def to_bytes(self, *, dedupe: bool = False) -> bytes:
-        """Serialize a ``STR`` section.
+    def to_bytes(self, *, dedupe: bool = False, wide: bool = False) -> bytes:
+        """Serialize a ``STR`` section, or a ``STRx`` one when ``wide``.
+
+        ``STRx`` is exactly ``STR`` with the count and every offset widened from
+        ``u16`` to ``u32``; nothing else about the layout changes.
 
         Unused slots point at a single shared NUL placed immediately after the
         offset table, which is what StarEdit and Chkdraft both emit.
@@ -574,25 +597,31 @@ class StringTable:
         produces it, so it is off by default rather than risking a tool that
         assumes otherwise.
         """
+        width = 4 if wide else 2
+        pack = _U32 if wide else _U16
+        max_offset = self.MAX_OFFSET_WIDE if wide else self.MAX_OFFSET
+        max_ids = self.MAX_IDS_WIDE if wide else self.MAX_IDS
+        label = "STRx" if wide else "STR"
+
         count = max(self.declared_count, max(self.strings, default=0))
-        if count > self.MAX_IDS:
+        if count > max_ids:
             raise ValueError(
                 f"{count} string ids exceeds the reachable maximum of "
-                f"{self.MAX_IDS}: the offset table alone would occupy "
-                f"{2 + 2 * count} bytes of a {self.MAX_OFFSET + 1}-byte "
+                f"{max_ids} for {label}: the offset table alone would occupy "
+                f"{width + width * count} bytes of a {max_offset + 1}-byte "
                 f"addressable space"
             )
 
-        header_size = 2 + 2 * count
+        header_size = width + width * count
         # Count the terminating NUL for every string. Omitting it is the exact
         # arithmetic slip that lets Chkdraft emit wrapped offsets.
         payload = sum(len(v) + 1 for v in self.strings.values())
         total = header_size + 1 + payload  # +1 for the shared NUL
-        if total - 1 > self.MAX_OFFSET:
+        if total - 1 > max_offset:
             raise ValueError(
-                f"string table needs {total} bytes but STR offsets are 16-bit, "
-                f"so nothing past byte {self.MAX_OFFSET} can be addressed; "
-                f"remove or shorten strings"
+                f"string table needs {total} bytes but {label} offsets are "
+                f"{width * 8}-bit, so nothing past byte {max_offset} can be "
+                f"addressed; remove or shorten strings"
             )
 
         offsets = [header_size] * count  # default: the shared NUL
@@ -610,15 +639,15 @@ class StringTable:
 
         # Belt and braces: a bug in the arithmetic above must not reach a file.
         for string_id, offset in enumerate(offsets, start=1):
-            if offset > self.MAX_OFFSET:
+            if offset > max_offset:
                 raise ValueError(
                     f"string {string_id} would sit at byte {offset}, past the "
-                    f"16-bit offset limit"
+                    f"{width * 8}-bit offset limit"
                 )
 
         return (
-            _U16.pack(count)
-            + b"".join(_U16.pack(o) for o in offsets)
+            pack.pack(count)
+            + b"".join(pack.pack(o) for o in offsets)
             + bytes(data)
             + self.tail
         )
@@ -643,6 +672,7 @@ TYPED_SECTIONS: dict[str, str] = {
     "TRIG": "TriggerListView",
     "MBRF": "TriggerListView (briefing action ids)",
     "STR": "StringTableView (read-only)",
+    "STRx": "StringTableView, 32-bit (read-only; supersedes STR)",
 }
 """Sections this library interprets, and the view each maps to."""
 
@@ -665,6 +695,10 @@ def view_for(chk: Chk, name: str):
 
     The effective section is the last one with that name, matching StarCraft's
     override order (SPEC 1.5).
+
+    This resolves the name it is given literally. To get whichever string table
+    a map actually uses, call :func:`string_table_for` instead -- ``STRx``
+    supersedes ``STR`` and that rule is not expressible as a section lookup.
     """
     section = chk.last(name)
     if section is None:
@@ -674,5 +708,29 @@ def view_for(chk: Chk, name: str):
         return RecordArrayView.from_section(section, _RECORD_SECTIONS[key])
     if key in ("TRIG", "MBRF"):
         return TriggerListView.from_section(section, is_briefing=key == "MBRF")
+    if key == "STRx":
+        return StringTableView.from_section(section, wide=True)
     view_cls = _SCALAR_SECTIONS.get(key)
     return view_cls.from_section(section) if view_cls else None
+
+
+def string_table_for(chk: Chk) -> StringTableView | None:
+    """The string table a map's references actually resolve against.
+
+    **``STRx`` wins over ``STR``, in either file order** (SPEC 5.2). Chkdraft,
+    bw-chk and eudplib agree; Chkdraft gates its ``STR`` reader on the absence of
+    ``STRx`` *and* clears the table when reading ``STRx``, so it wins whichever
+    comes second.
+
+    Not every implementation does this. blackvrice abstains when both are
+    present and leaves every reference unresolved, which means failing to open
+    perfectly ordinary Remastered maps that kept a legacy ``STR``.
+
+    Empirically, of 423 installed maps, 24 carry ``STRx`` and **none carries
+    both** -- so the precedence rule is real but unexercised by those maps.
+    """
+    for name in ("STRx", "STR"):
+        section = chk.last(name)
+        if section is not None:
+            return StringTableView.from_section(section, wide=name == "STRx")
+    return None
