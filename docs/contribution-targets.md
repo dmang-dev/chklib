@@ -36,7 +36,7 @@ Pure string handling, unit-testable, and it is a real cross-platform prerequisit
 
 ### Chkdraft #139 — Favor deleted constructors over private ones
 
-Mechanical, mechanically checkable, compiler-verified. Low value on its own, but it is a
+Mechanical and compiler-verified. Low value on its own, but it is a
 clean way to get a first PR merged and learn the review cadence.
 
 ### eudplib — a fresh clone does not build *(no issue filed — found here)*
