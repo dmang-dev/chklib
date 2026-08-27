@@ -3,6 +3,24 @@
 A library with no consumer is a guess. This scopes the one program that gets built
 *with* the CHK library, defines the library by what that program needs, and stops there.
 
+> **Status: complete.** All five milestones are done and the acceptance gate below is
+> green. 790 tests pass, covering a corpus of 488 real maps.
+>
+> | Milestone | State |
+> |---|---|
+> | 1. Container | done — byte-exact round-trip on 65 maps |
+> | 2. Typed views | done — 14 sections, typed round-trip green |
+> | 3. `chkdiff inspect` | done — deterministic across all 65 |
+> | 4. `chkdiff diff` | done — LCS trigger alignment, no cascade |
+> | 5. git `textconv` | done — tested against a real repository |
+>
+> One thing this plan got wrong: it listed the **archive layer as library requirement 1
+> but never made it a milestone**, so MPQ reading was discovered as a blocker only when
+> milestone 5 needed it. It was then written fresh (MPQ v1 + a PKWARE exploder) to keep
+> the project MIT-licensed, and verified byte-for-byte against StormLib on 488 maps.
+>
+> Consumer #2 now decides what comes next, as intended.
+
 ## The pick
 
 **`chkdiff` — a CHK-aware diff and inspect CLI, plus a git integration.**
