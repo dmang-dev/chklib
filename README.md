@@ -3,9 +3,9 @@
 A read/write library for StarCraft map data, and `chkdiff` — a CHK-aware diff tool
 that makes `git diff` say something useful about a `.scx` file.
 
-**Status: early but usable.** The section container, typed views, MPQ reading, `chkdiff
-inspect` and `chkdiff diff` are implemented. `chkdiff` reads `.scm`/`.scx` map files
-directly. The git `textconv` integration is the last piece.
+**Status: working end to end.** The section container, typed views, MPQ reading,
+`chkdiff inspect`, `chkdiff diff` and the git integration are all implemented and tested.
+`git diff` on a `.scx` shows what actually changed in the map.
 
 ## Why
 
@@ -227,6 +227,56 @@ silently absorbed, so a caller can tell a protected map from a clean one.
 One honest gap: the literal-mode byte was 0 in all 488 maps, so the 256-symbol Huffman
 table for coded literals has never been exercised against ground truth. It is marked
 unverified in the source.
+
+## Git integration
+
+`git diff` on a map file says this today:
+
+```
+Binary files a/map.scx and b/map.scx differ
+```
+
+Two lines of setup replace that with the actual change:
+
+```bash
+chkdiff install-textconv          # prints the commands; --write applies them
+```
+
+```bash
+git config --global diff.starcraft.textconv "chkdiff textconv"
+git config --global diff.starcraft.binary false
+```
+
+plus, in `.gitattributes`:
+
+```
+*.scm diff=starcraft
+*.scx diff=starcraft
+*.chk diff=starcraft
+```
+
+After which the same commit reads:
+
+```diff
+ [map]
+ version      205  Brood War
+ tileset      5  Desert
+-dimensions   128x96 tiles  (4096x3072 px)
+-name         #1 "Dust Bowl"
++dimensions   128x128 tiles  (4096x4096 px)
++name         #1 "Hot Zone"
+```
+
+`chkdiff textconv` exists as its own subcommand rather than being an alias for
+`inspect --stable`, because a textconv driver has a requirement ordinary commands don't:
+**it must never fail.** Git runs it over every blob on both sides of a diff, including
+historical ones that may be truncated, protected, or not maps at all — and a driver that
+exits non-zero makes `git diff` fail outright, which is worse than no driver. So it always
+exits 0, always prints something, and degrades unreadable input to a short deterministic
+note that never contains the randomised temp path git passes in.
+
+The tests drive a real git repository rather than mocking it, and assert the status quo
+(`Binary files ... differ`) as well as the improvement.
 
 ## Development
 

@@ -61,6 +61,76 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0 if report.is_empty else 1
 
 
+def _cmd_textconv(args: argparse.Namespace) -> int:
+    """The git textconv driver. Must never fail.
+
+    Git runs this over every blob on both sides of a diff, including historical
+    ones that may be truncated, protected, or not maps at all. A driver that
+    exits non-zero or raises makes ``git diff`` fail outright, so anything
+    unreadable degrades to a short deterministic note instead.
+
+    The note is deliberately content-derived rather than error-derived: two
+    unreadable blobs with the same bytes must produce the same text, or the diff
+    churns.
+    """
+    path = pathlib.Path(args.path)
+    try:
+        chk = _load(path)
+    except SystemExit as exc:
+        # _load raises SystemExit with a human message; keep the reason but not
+        # the path, which git randomises per invocation.
+        reason = str(exc).replace(str(path), "").lstrip(": ").strip()
+        sys.stdout.write(f"# openstaredit: unreadable ({reason})\n")
+        return 0
+    except Exception as exc:  # noqa: BLE001 - a driver must not propagate
+        sys.stdout.write(f"# openstaredit: unreadable ({type(exc).__name__})\n")
+        return 0
+    sys.stdout.write(render(chk, source=None))
+    return 0
+
+
+_GIT_SETUP = """\
+# 1. Tell git how to render a map as text (once per machine, or --local):
+git config --global diff.starcraft.textconv "chkdiff textconv"
+git config --global diff.starcraft.binary false
+
+# 2. Tell git which files that applies to. In .gitattributes:
+*.scm diff=starcraft
+*.scx diff=starcraft
+*.chk diff=starcraft
+"""
+
+
+def _cmd_install_textconv(args: argparse.Namespace) -> int:
+    scope = "--local" if args.local else "--global"
+    if not args.write:
+        sys.stdout.write(_GIT_SETUP)
+        sys.stdout.write(
+            "\nRe-run with --write to apply the git config, and --local to scope"
+            " it to this repository.\n"
+        )
+        return 0
+
+    import subprocess
+
+    for key, value in (
+        ("diff.starcraft.textconv", "chkdiff textconv"),
+        ("diff.starcraft.binary", "false"),
+    ):
+        result = subprocess.run(
+            ["git", "config", scope, key, value],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise SystemExit(f"git config failed: {result.stderr.strip()}")
+        print(f"set {key} = {value!r} ({scope})")
+    print("\nNow add these lines to .gitattributes:")
+    print("  *.scm diff=starcraft")
+    print("  *.scx diff=starcraft")
+    print("  *.chk diff=starcraft")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chkdiff",
@@ -106,6 +176,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit machine-readable JSON instead of text",
     )
     compare.set_defaults(func=_cmd_diff)
+
+    textconv = sub.add_parser(
+        "textconv",
+        help="render a map for git's diff.<driver>.textconv",
+        description=(
+            "Render a map as deterministic text for git. Always exits 0 and "
+            "always prints something, because a textconv driver that fails "
+            "makes git diff fail."
+        ),
+    )
+    textconv.add_argument("path", help="path to a map or scenario.chk")
+    textconv.set_defaults(func=_cmd_textconv)
+
+    install = sub.add_parser(
+        "install-textconv",
+        help="print (or apply) the git configuration for map diffs",
+    )
+    install.add_argument(
+        "--write", action="store_true", help="run the git config commands"
+    )
+    install.add_argument(
+        "--local", action="store_true",
+        help="scope the config to this repository instead of the whole machine",
+    )
+    install.set_defaults(func=_cmd_install_textconv)
     return parser
 
 
