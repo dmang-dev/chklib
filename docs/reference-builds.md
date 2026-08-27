@@ -82,3 +82,69 @@ flutter pub get; flutter analyze; flutter test; flutter build windows --debug
 Its `native/` helpers (`map_archive_helper` over StormLib, `starcraft_data_helper` over
 CascLib + GRP/palette/doodad decoders) are separate CMake C++ executables driven as
 **child processes**, not FFI.
+
+---
+
+# Build results
+
+Verified on this machine, 2026-08-26. VS 2022 BuildTools 17.x (MSVC 14.44.35207),
+Windows SDK 10.0.22000, Rust 1.96.0, Python 3.13.14, Flutter 3.44.8.
+
+| Project | Configure | Build | Tests | Runs |
+|---|---|---|---|---|
+| Chkdraft | ok | ok, 0 errors | **70/71** | yes |
+| eudplib (source) | — | ok | 65/65 maps parsed | yes |
+| euddraft | — | ok | CLI ok | yes |
+| starcraft_map_editor | ok | ok, 121.7s | **378/378** | yes |
+
+## Chkdraft
+
+`Chkdraft.exe`, 7.2 MB. Launches; with no StarCraft installation present it opens a
+data-file browse prompt, which is correct behaviour — it needs `StarDat.mpq` /
+`BrooDat.mpq` / `patch_rt.mpq` to render anything.
+
+Test suites: CrossCut 36/36, Chkdraft 4/4, Windows 1/1, MappingCore 29/30.
+
+The single failure is **`MiniMapTest.MiniMapTest`**, and it is an upstream test bug
+rather than a defect in the editor. `TestAssets::LoadScData()` reads the `SC_ASSET`
+environment variable and returns `false` immediately when it is unset
+(`test/mapping_core/test_assets.cpp`). `MiniMapTest` ignores that return value and
+uses the still-empty `Sc::Data`, so the test dies on an access violation
+(SEH `0xc0000005`) instead of skipping:
+
+```cpp
+Sc::Data scData {};
+TestAssets::LoadScData(scData);   // returns false when SC_ASSET is unset
+// ... proceeds to use scData regardless
+```
+
+A `GTEST_SKIP()` on a false return would fix it. Anyone without a StarCraft install
+sees this failure; it says nothing about map-editing correctness.
+
+## eudplib — conformance run against the sc64 corpus
+
+Cross-checked the source build against the StarCraft 64 maps from
+`I:\projects\sc64-maps`, which are an independent corpus: rebuilt from an N64 BOLT
+archive rather than authored by StarEdit.
+
+**65/65 opened, 0 failures.** Section walk of the first map matches expectations for a
+hybrid scenario — 37 sections, `DIM` 64x64, `TRIG` 84000 bytes (35 triggers), `MBRF`
+2400 bytes (1 briefing trigger).
+
+## starcraft_map_editor
+
+Three binaries: `starcraft_map_editor.exe`, plus `map_archive_helper.exe` and
+`starcraft_data_helper.exe`. StormLib and CascLib are pulled by CMake `FetchContent` at
+pinned revisions and built from source, so there are no system dependencies.
+
+The helpers speak versioned JSON over stdio and report the library revision they were
+built against in every response:
+
+```json
+{"error":{"code":"ARCHIVE_PROTOCOL_INVALID_JSON",...},"helperVersion":"0.4.0",
+ "protocolVersion":1,"stormLibRevision":"c91595a1a1b7b515567bd62a60af066914a29a6a"}
+```
+
+MPQ parsing — the part that handles untrusted input — therefore runs out-of-process and
+can crash without taking the editor down. This is the most reusable idea found in the
+survey, and it is language-agnostic.
