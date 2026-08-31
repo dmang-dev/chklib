@@ -44,4 +44,4 @@ __all__ = [
     "IsomGrid", "terrain_for", "isom_for", "string_table_for", "view_for",
     "TYPED_SECTIONS",
 ]
-__version__ = "0.0.2"
+__version__ = "0.1.0"
