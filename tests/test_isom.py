@@ -18,7 +18,6 @@ in-game consequence, which is also why it is so often malformed.
 
 from __future__ import annotations
 
-import glob
 import pathlib
 import struct
 
@@ -27,6 +26,7 @@ import pytest
 from chklib import Chk
 from chklib.records import IsomRect
 from chklib.views import IsomGrid, isom_for
+from conftest import installed_maps
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -207,7 +207,7 @@ def test_editing_emits_the_full_grid() -> None:
 # --------------------------------------------------------------------------
 
 CORPUS = sorted((pathlib.Path(__file__).parent / "fixtures" / "corpus").glob("*.chk"))
-INSTALLED = sorted(set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recursive=True)))
+INSTALLED = installed_maps()
 
 
 def _real_chks():

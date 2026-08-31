@@ -10,7 +10,7 @@ Extraction deliberately goes through **eudplib's** MPQ reader rather than our
 own. Generating the corpus with an independent implementation means the gate
 cannot pass by agreeing with our own bugs.
 
-    python tools/extract_fixtures.py "I:/projects/sc64-maps/gamedata/maps/*.scm"
+    python tools/extract_fixtures.py "path/to/maps/*.scm"
 
 Requires the ``fixtures`` extra:  pip install -e ".[fixtures]"
 """
@@ -19,12 +19,16 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import pathlib
 import sys
 
+#: Where to look when no pattern is given. Override the root with the
+#: CHKLIB_SC64_MAPS environment variable, the same one the tests use.
+_SC64_ROOT = os.environ.get("CHKLIB_SC64_MAPS", "I:/projects/sc64-maps/gamedata")
 DEFAULT_GLOBS = [
-    r"I:/projects/sc64-maps/gamedata/maps/*.scm",
-    r"I:/projects/sc64-maps/gamedata/maps-solo/*.scm",
+    f"{_SC64_ROOT}/maps/*.scm",
+    f"{_SC64_ROOT}/maps-solo/*.scm",
 ]
 DEFAULT_OUT = pathlib.Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "corpus"
 

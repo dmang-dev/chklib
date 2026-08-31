@@ -26,6 +26,7 @@ import pytest
 
 from chklib import Chk, StringTable
 from chklib.views import StringTableView, string_table_for, view_for
+from conftest import installed_maps
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -378,9 +379,8 @@ def test_string_table_for_returns_none_when_absent() -> None:
 # STRx against real Remastered maps
 # --------------------------------------------------------------------------
 
-import glob  # noqa: E402
 
-_INSTALLED = sorted(set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recursive=True)))
+_INSTALLED = installed_maps()
 
 
 def _strx_maps() -> list[bytes]:

@@ -15,7 +15,6 @@ and, when a StarCraft installation is present, over every map it ships.
 
 from __future__ import annotations
 
-import glob
 import pathlib
 import struct
 
@@ -24,6 +23,7 @@ import pytest
 from chklib import mpq, pkware
 from chklib.mpq import MpqArchive, MpqError, SCENARIO_PATH, looks_like_mpq
 from chklib.pkware import PkwareError, explode
+from conftest import installed_maps, sc64_maps
 
 # Canonical MPQ table keys: hash("(hash table)", 3) and hash("(block table)", 3).
 HASH_TABLE_KEY = 0xC3AF3770
@@ -167,10 +167,7 @@ def test_sector_that_did_not_shrink_is_stored_verbatim() -> None:
 # Ground truth: the sc64 corpus
 # --------------------------------------------------------------------------
 
-SC64_MAPS = sorted(
-    glob.glob(r"I:\projects\sc64-maps\gamedata\maps\*.scm")
-    + glob.glob(r"I:\projects\sc64-maps\gamedata\maps-solo\*.scm")
-)
+SC64_MAPS = sc64_maps()
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "corpus"
 
 _PAIRS = [
@@ -194,10 +191,7 @@ def test_matches_stormlib_on_the_sc64_corpus(archive: str, expected: pathlib.Pat
 # Ground truth: a real StarCraft installation
 # --------------------------------------------------------------------------
 
-SC_MAPS = sorted(
-    set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.scm", recursive=True))
-    | set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.scx", recursive=True))
-)
+SC_MAPS = installed_maps()
 
 
 def _stormlib(path: str) -> bytes:

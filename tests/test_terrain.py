@@ -23,6 +23,7 @@ import pytest
 
 from chklib import Chk
 from chklib.views import FogGrid, TileGrid, terrain_for, view_for
+from conftest import installed_maps
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -436,9 +437,8 @@ def test_inspect_flags_a_clamped_dim() -> None:
 # has 55 short, 7 long, 29 odd and 24 duplicated instances. These tests exist so
 # that the gap that hid those defects cannot reopen.
 
-import glob  # noqa: E402
 
-INSTALLED = sorted(set(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recursive=True)))
+INSTALLED = installed_maps()
 
 
 def _installed_chks():

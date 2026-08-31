@@ -13,7 +13,6 @@ driver, and git's own diffing of the result.
 
 from __future__ import annotations
 
-import glob
 import pathlib
 import shutil
 import struct
@@ -23,8 +22,9 @@ import sys
 import pytest
 
 from chklib.cli import main
+from conftest import installed_maps
 
-MAPS = sorted(glob.glob(r"I:/Blizzard/StarCraft/Maps/**/*.sc[mx]", recursive=True))
+MAPS = installed_maps()
 
 
 def _git() -> str | None:
