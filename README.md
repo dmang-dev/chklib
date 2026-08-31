@@ -487,4 +487,8 @@ avoid. A file format's four-character code carries no such baggage.
 
 ## License
 
-MIT. Not affiliated with or endorsed by Blizzard Entertainment.
+MIT — see [LICENSE](LICENSE).
+
+StarCraft is a trademark of Blizzard Entertainment, Inc. This project is not
+affiliated with or endorsed by Blizzard Entertainment, and redistributes none of
+its data: the test corpora are read from your own installation and are gitignored.
