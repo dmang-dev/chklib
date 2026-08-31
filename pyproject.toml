@@ -10,7 +10,38 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 license-files = ["LICENSE"]
+authors = [
+    { name = "dmang-dev", email = "282426319+dmang-dev@users.noreply.github.com" },
+]
+keywords = [
+    "starcraft", "brood-war", "chk", "scm", "scx", "mpq",
+    "map-editor", "scenario", "diff", "textconv",
+]
+# Every version listed here has been checked: the package imports and
+# round-trips a CHK on 3.10 through 3.14.
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Games/Entertainment :: Real Time Strategy",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Archiving",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/dmang-dev/chklib"
+Source = "https://github.com/dmang-dev/chklib"
+Issues = "https://github.com/dmang-dev/chklib/issues"
 
 [project.scripts]
 chkdiff = "chklib.cli:main"
@@ -24,6 +55,12 @@ dev = ["pytest>=8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chklib"]
+
+[tool.hatch.build.targets.sdist]
+# Ship the tests and the fixture tool so the suite is runnable from an sdist.
+# The map corpora themselves are never included: they are copyrighted, read from
+# the user's own installation, and gitignored.
+include = ["src/", "tests/", "tools/", "docs/", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

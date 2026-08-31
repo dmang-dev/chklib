@@ -27,3 +27,6 @@ tests/fixtures/
 
 # Research scratch for the typed-views spec
 .research/
+
+# Build artifacts
+dist/
