@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Iterator
 
 from .chk import Chk, Section
+from .settings import SETTINGS_SECTIONS, settings_for
 from .records import (
     Action,
     Condition,
@@ -36,7 +37,7 @@ __all__ = [
     "Version", "TilesetRef", "RecordArrayView", "TriggerListView",
     "StringTableView", "StringTable", "TileGrid", "FogGrid", "IsomGrid",
     "terrain_for", "isom_for",
-    "view_for", "string_table_for", "TYPED_SECTIONS",
+    "view_for", "string_table_for", "settings_for", "TYPED_SECTIONS",
 ]
 
 _U16 = struct.Struct("<H")
@@ -1131,6 +1132,14 @@ TYPED_SECTIONS: dict[str, str] = {
     "TILE": "TileGrid (editor terrain)",
     "MASK": "FogGrid",
     "ISOM": "IsomGrid (editor-only)",
+    "WAV": "SoundPaths",
+    "SWNM": "SwitchNames",
+    "UNIS": "UnitSettings",
+    "UNIx": "UnitSettings (expansion weapons)",
+    "UPGS": "UpgradeSettings",
+    "UPGx": "UpgradeSettings (expansion, +1 pad byte)",
+    "TECS": "TechSettings",
+    "TECx": "TechSettings (expansion)",
 }
 """Sections this library interprets, and the view each maps to."""
 
@@ -1175,6 +1184,8 @@ def view_for(chk: Chk, name: str):
     if key.rstrip() == "ISOM":
         # ISOM needs the dimensions too, and its own derived grid shape.
         return isom_for(chk)
+    if section.name in SETTINGS_SECTIONS:
+        return settings_for(chk, section.name)
     view_cls = _SCALAR_SECTIONS.get(key)
     return view_cls.from_section(section) if view_cls else None
 

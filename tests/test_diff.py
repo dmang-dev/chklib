@@ -23,6 +23,7 @@ from chklib import Chk
 from chklib.cli import main
 from chklib.diff import JSON_SCHEMA_VERSION, diff
 from chklib.records import Action, Condition, Location, Trigger, Unit
+from chklib.settings import UnitSettings, UpgradeSettingsExpansion
 from chklib.views import view_for
 
 
@@ -408,3 +409,64 @@ def test_broken_pipe_is_handled_for_inspect(tmp_path: pathlib.Path, monkeypatch)
 
     monkeypatch.setattr("chklib.cli.sys.stdout", ClosedPipe())
     assert main(["inspect", str(a)]) == 141
+
+
+# ---------------------------------------------------------------------------
+# Settings tables
+# ---------------------------------------------------------------------------
+
+
+def _one_section(name: str, payload: bytes) -> Chk:
+    return Chk.from_bytes(sect(name.encode("ascii").ljust(4), payload))
+
+
+def _upgx(*, pad: int = 0, tail: bytes = b"") -> Chk:
+    table = UpgradeSettingsExpansion()
+    table.arrays["unused"][0] = pad
+    return _one_section("UPGx", table.to_bytes(normalize=True) + tail)
+
+
+def _unis(field: str, index: int, value: int) -> Chk:
+    table = UnitSettings()
+    table.arrays[field][index] = value
+    return _one_section("UNIS", table.to_bytes(normalize=True))
+
+
+def test_upgx_pad_byte_is_not_called_a_weapon() -> None:
+    """``UPGx`` models 61 upgrades and no weapons at all.
+
+    Its one pad byte is the only field whose element count differs from the
+    upgrade count, so choosing the label by comparing counts -- which is how a
+    unit table tells its weapon arrays from its unit arrays -- reported a
+    changed pad byte as ``weapon 0`` in a section that has no weapon 0. Each
+    table now declares what an index means instead of it being inferred.
+    """
+    text = diff(_upgx(pad=0), _upgx(pad=7)).to_text()
+    assert "unused=7" in text
+    assert "weapon" not in text
+    # One byte is not an array, so an index into it would be noise.
+    assert "pad byte\n" in text and "pad byte 0" not in text
+
+
+def test_unit_weapon_arrays_are_still_indexed_by_weapon() -> None:
+    """The other half of the same fix: the damage arrays really are indexed by
+    weapon rather than by unit, and must keep saying so."""
+    assert "weapon 3" in diff(
+        _unis("base_damage", 3, 0), _unis("base_damage", 3, 40)
+    ).to_text()
+    assert "unit 151" in diff(
+        _unis("hitpoints", 151, 1024000), _unis("hitpoints", 151, 384000)
+    ).to_text()
+
+
+def test_changed_trailing_bytes_render_differently() -> None:
+    """Reporting only the length announced a difference and then showed none.
+
+    An oversized section whose tail changes without changing size rendered as
+    ``1 bytes`` against ``1 bytes``. Nothing here decodes those bytes, so the
+    line carries a digest -- enough to show that the two sides really differ.
+    """
+    report = diff(_upgx(tail=b"\x01"), _upgx(tail=b"\x02"))
+    change = next(c for c in report.changes if c.key == "trailing bytes")
+    assert change.before != change.after
+    assert change.before.startswith("1 bytes sha=")

@@ -41,6 +41,7 @@ from .enums import (
     Tileset,
 )
 from .records import Action, Condition, Trigger
+from .settings import SoundPaths, UnitSettings, settings_for
 from .views import (
     Dimensions,
     Forces,
@@ -54,11 +55,12 @@ from .views import (
 
 __all__ = ["render", "FORMAT_VERSION"]
 
-FORMAT_VERSION = 4
+FORMAT_VERSION = 6
 """Bumped when the output shape changes in a way that would churn every diff.
 
 v2 added the ``[terrain]`` block; v3 added ISOM to it; v4 renamed the
-project, which changes the header line on every rendering.
+project, which changes the header line on every rendering; v5 added
+``[settings]``.
 """
 
 _FORCE_FLAG_NAMES = (
@@ -350,6 +352,99 @@ def render(chk: Chk, *, source: str | None = None) -> str:
 
     if terrain_lines:
         out += ["", "[terrain]"] + terrain_lines
+
+    # -- settings ----------------------------------------------------------
+    # Only customised entries are listed. These tables are ~4 KB of mostly
+    # defaults, and printing 228 unchanged unit rows would bury the handful a
+    # mapper actually altered.
+    #
+    # Every section also carries a digest of its bytes, because the rows alone
+    # cannot be complete: the weapon damage arrays are indexed by weapon rather
+    # than by unit and have no flag to select interesting ones, and an oversized
+    # section's trailing bytes are not modelled at all. Without the digest a
+    # change to either diffs as no change, which for a textconv driver is worse
+    # than being verbose.
+    settings_lines: list[str] = []
+
+    def _digest(table) -> str:
+        return hashlib.sha1(table.to_bytes()).hexdigest()[:8]
+
+    def _note(table) -> str:
+        if table.is_short:
+            return "  [short]"
+        if table.is_oversized:
+            return f"  [+{len(table.trailing_bytes)} trailing]"
+        return ""
+
+    for name in ("UNIS", "UNIx", "UPGS", "UPGx", "TECS", "TECx"):
+        table = settings_for(chk, name)
+        if table is None:
+            continue
+        flags = table["use_default"]
+        custom = [i for i, v in enumerate(flags) if not v]
+        settings_lines.append(
+            f"{name}  {len(custom)} of {len(flags)} customised"
+            f"{_note(table)}  sha={_digest(table)}"
+        )
+        for index in custom:
+            bits = [f"  {name} {index:>3}"]
+            if isinstance(table, UnitSettings):
+                bits.append(
+                    f"hp={UnitSettings.displayed_hitpoints(table['hitpoints'][index])}"
+                )
+                bits.append(f"shield={table['shield_points'][index]}")
+                bits.append(f"armor={table['armor_level'][index]}")
+                bits.append(
+                    f"cost={table['mineral_cost'][index]}m/{table['gas_cost'][index]}g"
+                )
+                bits.append(f"build={table['build_time'][index]}")
+                named = table.custom_name_id(index)
+                if named:
+                    bits.append(f"name={_string_of(strings, named)}")
+            elif "base_mineral_cost" in table:
+                # Upgrades: each cost is a base plus a per-level increment, and
+                # a map that alters only the increment is a real edit.
+                bits.append(
+                    f"mineral={table['base_mineral_cost'][index]}"
+                    f"+{table['mineral_cost_factor'][index]}"
+                )
+                bits.append(
+                    f"gas={table['base_gas_cost'][index]}"
+                    f"+{table['gas_cost_factor'][index]}"
+                )
+                bits.append(
+                    f"time={table['base_research_time'][index]}"
+                    f"+{table['research_time_factor'][index]}"
+                )
+            else:
+                bits.append(f"mineral={table['mineral_cost'][index]}")
+                bits.append(f"gas={table['gas_cost'][index]}")
+                bits.append(f"time={table['research_time'][index]}")
+                bits.append(f"energy={table['energy_cost'][index]}")
+            settings_lines.append("  ".join(bits))
+
+    for name, label in (("WAV", "sounds"), ("SWNM", "switches")):
+        table = settings_for(chk, name)
+        if table is None:
+            continue
+        # Through the named accessors rather than the arrays dict, whose first
+        # entry is only coincidentally the one wanted.
+        ids = (
+            table.sound_string_ids
+            if isinstance(table, SoundPaths)
+            else table.switch_string_ids
+        )
+        used = table.used_slots() if isinstance(table, SoundPaths) else table.named_switches()
+        settings_lines.append(
+            f"{name}  {len(used)} {label} named{_note(table)}  sha={_digest(table)}"
+        )
+        for index in used:
+            settings_lines.append(
+                f"  {name} {index:>3}  {_string_of(strings, ids[index])}"
+            )
+
+    if settings_lines:
+        out += ["", "[settings]"] + settings_lines
 
     # -- units -------------------------------------------------------------
     units = view_for(chk, "UNIT")

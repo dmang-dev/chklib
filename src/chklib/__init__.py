@@ -10,6 +10,19 @@ from .records import (
     Trigger,
     Unit,
 )
+from .settings import (
+    USE_DEFAULT_NO,
+    USE_DEFAULT_YES,
+    SoundPaths,
+    SwitchNames,
+    TechSettings,
+    TechSettingsExpansion,
+    UnitSettings,
+    UnitSettingsExpansion,
+    UpgradeSettings,
+    UpgradeSettingsExpansion,
+    settings_for,
+)
 from .views import (
     Forces,
     Dimensions,
@@ -41,7 +54,11 @@ __all__ = [
     "Dimensions", "Version", "TilesetRef", "PlayerSlots", "PlayerRaces",
     "ScenarioProperties", "Forces", "RecordArrayView", "TriggerListView",
     "StringTableView", "StringTable", "TileGrid", "FogGrid",
-    "IsomGrid", "terrain_for", "isom_for", "string_table_for", "view_for",
+    "IsomGrid", "terrain_for", "isom_for",
+    "SoundPaths", "SwitchNames", "UnitSettings", "UnitSettingsExpansion",
+    "UpgradeSettings", "UpgradeSettingsExpansion", "TechSettings",
+    "TechSettingsExpansion", "USE_DEFAULT_NO", "USE_DEFAULT_YES",
+    "settings_for", "string_table_for", "view_for",
     "TYPED_SECTIONS",
 ]
 __version__ = "0.1.0"

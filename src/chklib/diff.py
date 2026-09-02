@@ -42,6 +42,7 @@ from .chk import Chk
 from .enums import Race, SlotType, Tileset
 from .inspect import _action_line, _condition_line, _quote, _enum_name
 from .records import Trigger
+from .settings import SoundPaths, SwitchNames, settings_for
 from .views import StringTableView, string_table_for, view_for
 
 __all__ = ["Change", "DiffReport", "diff", "JSON_SCHEMA_VERSION"]
@@ -465,6 +466,92 @@ def _diff_triggers(report: DiffReport, a: Chk, b: Chk, section: str,
 # ---------------------------------------------------------------------------
 
 
+#: What one entry of each settings table is called, for readable diff keys.
+_SETTINGS_ENTITY = {
+    "UNIS": "unit", "UNIx": "unit",
+    "UPGS": "upgrade", "UPGx": "upgrade",
+    "TECS": "tech", "TECx": "tech",
+    "WAV": "sound", "SWNM": "switch",
+}
+
+
+def _tail(data: bytes) -> str:
+    """Describe an uninterpreted trailing tail.
+
+    Nothing in this library decodes the bytes an oversized settings section
+    carries past its layout, so this reports a length and a digest rather than a
+    decode. The digest is what makes the line say something: a tail that changes
+    without changing length would otherwise report "1 bytes" against "1 bytes",
+    announcing a difference and then showing none.
+    """
+    return f"{len(data)} bytes sha={hashlib.sha1(data).hexdigest()[:8]}"
+
+
+def _diff_settings(report: DiffReport, a: Chk, b: Chk,
+                   sa: StringTableView | None, sb: StringTableView | None) -> None:
+    """Compare the settings tables entry by entry.
+
+    Without this a map whose only change is a unit's hitpoints or an upgrade's
+    cost diffs as no change at all: ``_diff_sections`` compares section names,
+    order and sizes, and a settings edit alters none of the three. ``inspect``
+    renders those edits, so leaving them out here would have the two consumers
+    of the same views disagree about whether anything happened.
+
+    Fields are grouped by element count so that the unit tables' weapon arrays,
+    which are indexed by weapon rather than by unit, report against a weapon
+    number instead of being forced into a unit row.
+    """
+    for name in ("UNIS", "UNIx", "UPGS", "UPGx", "TECS", "TECx", "WAV", "SWNM"):
+        table_a = settings_for(a, name)
+        table_b = settings_for(b, name)
+        if table_a is None or table_b is None:
+            # A section present on only one side is already reported by
+            # _diff_sections as an added or removed section.
+            continue
+
+        entity = _SETTINGS_ENTITY[name]
+        table_cls = type(table_a)
+        # Grouped by what one index *means*, which each table declares, rather
+        # than by array length. Length cannot tell the cases apart: UPGx's pad
+        # byte is the one field whose count differs from the upgrade count, so
+        # inferring from length reports a changed pad byte as "weapon 0" in a
+        # section that models no weapons at all.
+        groups: dict[tuple[str, int], list[str]] = {}
+        for field_name, _code, count in table_cls.LAYOUT:
+            label = table_cls.INDEXED_BY.get(field_name, entity)
+            groups.setdefault((label, count), []).append(field_name)
+
+        for (label, count), fields in groups.items():
+            for index in range(count):
+                changed = [
+                    (f, table_a[f][index], table_b[f][index])
+                    for f in fields
+                    if table_a[f][index] != table_b[f][index]
+                ]
+                if not changed:
+                    continue
+                key = f"{label} {index}" if count > 1 else label
+                if isinstance(table_a, (SoundPaths, SwitchNames)):
+                    _, before_id, after_id = changed[0]
+                    report.add(
+                        name, "changed", key,
+                        before=_string(sa, before_id), after=_string(sb, after_id),
+                    )
+                    continue
+                report.add(
+                    name, "changed", key,
+                    before=" ".join(f"{f}={x}" for f, x, _ in changed),
+                    after=" ".join(f"{f}={y}" for f, _, y in changed),
+                )
+
+        if table_a.trailing_bytes != table_b.trailing_bytes:
+            report.add(
+                name, "changed", "trailing bytes",
+                before=_tail(table_a.trailing_bytes),
+                after=_tail(table_b.trailing_bytes),
+            )
+
+
 def diff(a: Chk, b: Chk) -> DiffReport:
     """Compare two scenarios semantically."""
     report = DiffReport()
@@ -480,5 +567,6 @@ def diff(a: Chk, b: Chk) -> DiffReport:
     _diff_units(report, a, b, "THG2", _sprite_describe, _sprite_key)
     _diff_triggers(report, a, b, "TRIG", sa, sb)
     _diff_triggers(report, a, b, "MBRF", sa, sb)
+    _diff_settings(report, a, b, sa, sb)
     _diff_sections(report, a, b)
     return report

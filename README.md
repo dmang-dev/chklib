@@ -87,9 +87,19 @@ for trigger in view_for(chk, "TRIG"):             # 2400-byte records
         ActionType(action.action_type)            # CreateUnitWithProperties, ...
 ```
 
-Covered: `DIM VER ERA OWNR IOWN SIDE SPRP FORC UNIT THG2 MRGN TRIG MBRF STR STRx MTXM
-TILE MASK ISOM`. Everything else — `VCOD`, `PUNI`, `UPGR`, `WAV`, `UNIS` and the rest — is
-reachable as raw bytes through the container and round-trips untouched.
+Covered — 27 sections:
+
+```
+DIM VER ERA OWNR IOWN SIDE SPRP FORC          map and players
+UNIT THG2 MRGN                                objects and locations
+MTXM TILE MASK ISOM                           terrain
+STR STRx                                      strings
+TRIG MBRF                                     triggers and briefings
+WAV SWNM UNIS UNIx UPGS UPGx TECS TECx        settings
+```
+
+What remains untyped — `TYPE IVER IVE2 VCOD PUNI UPGR PTEC PUPx PTEx DD2 UPRP UPUS COLR
+CRGB` — is reachable as raw bytes through the container and round-trips untouched.
 
 Three behaviours worth knowing, each of which a naive implementation gets wrong:
 
@@ -104,6 +114,61 @@ The format work behind this is in `.research/SPEC.md` (gitignored, regenerable):
 independent implementations cross-checked against each other and validated against the
 corpus, with every claim carrying a confidence tier and every unresolved disagreement
 listed rather than guessed at.
+
+## Settings tables
+
+`WAV`, `SWNM`, `UNIS`/`UNIx`, `UPGS`/`UPGx` and `TECS`/`TECx` are all the same shape: a
+fixed-size section of parallel arrays, one entry per unit, upgrade, technology, switch or
+sound. This is where a map's *custom* unit statistics live.
+
+```python
+from chklib.settings import UnitSettings, settings_for
+
+units = settings_for(chk, "UNIS")
+units.customised_units()            # [151]
+units.custom_name_id(151)           # 30  -> "Cerebrate Zasz"
+UnitSettings.displayed_hitpoints(units["hitpoints"][151])   # 1500
+```
+
+Four traps, each producing a wrong map rather than an error:
+
+**`useDefault` is inverted from the obvious reading.** `No = 0`, `Yes = 1`, so a *set* flag
+means *use the game's built-in stats and ignore the custom data here* — which makes the
+custom name id dead. Read as "this entry is customised" and you invert every unit in the
+map. `custom_name_id` returns 0 behind a set flag rather than a name the game never shows.
+
+**The unset value is 1, not 0.** These structs are built with
+`memset(&useDefault, Yes, ...)`, so an entry a short section never reached uses defaults.
+Zero-filling the gap — the obvious way to pad — asserts the exact opposite, and the first
+edit writes that inversion to disk.
+
+**`UPGx` has one pad byte after its flag array and `UPGS` does not** — and `TECS`/`TECx`
+have none, so the rule doesn't generalise. Its *position* is the whole trap: move it to the
+end of the layout and the section still totals 794 bytes while all six cost arrays shift.
+
+**Unit hitpoints are stored at 256× the displayed value.** Both directions are provided;
+reading with `displayed_hitpoints` and writing the value straight back would otherwise
+store 1/256th of the intended health, silently.
+
+### How the layout is actually checked
+
+A round-trip test cannot verify field order. `_pack` and `_unpack` walk the same layout in
+the same order, so **swapping two same-width fields still round-trips every byte
+perfectly**, still totals 4048, and still puts `nameStringId` at 3192. Re-deriving an
+offset by summing the layout is no better — it only asks the code to agree with itself.
+
+So the field order is transcribed from Chkdraft's `REFLECT` declarations, and the tests pin
+each field at a **literal byte offset** that is never computed from the code under test.
+A golden test reads a known fixture and asserts the actual values (`Cerebrate Zasz`,
+1500 hp, armor 1), which a transposed layout or a two-byte drift cannot satisfy.
+
+Measured across the 423 installed maps, and recorded as tests rather than assumed:
+
+- **166 carry both `UNIS` and `UNIx`.** Which one wins is formally unresolved, but their
+  shared arrays are byte-identical in all 166, so the ambiguity has no practical effect
+  here. If that ever stops being true, precedence starts to matter.
+- Duplicate settings sections are real — one map ships two `WAV` sections. They resolve
+  last-wins: only `MTXM` takes the prefix-patch merge the terrain grids use.
 
 ## `chkdiff inspect`
 
