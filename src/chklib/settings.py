@@ -42,11 +42,8 @@ that transcription and the byte-offset tests are what hold it up.
 
 from __future__ import annotations
 
-import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import ClassVar
-
-from .chk import Section
 
 __all__ = [
     "SoundPaths",
@@ -64,8 +61,9 @@ __all__ = [
     "settings_for",
 ]
 
-_WIDTH = {"B": 1, "H": 2, "I": 4}
-_LIMIT = {"B": 0xFF, "H": 0xFFFF, "I": 0xFFFFFFFF}
+from ._tables import ArrayTable as _ArrayTable
+from ._tables import FillMap, Layout, LayoutError
+from .chk import Chk
 
 #: ``Chk::UseDefault`` (Chkdraft ``chk.h:88``). Note which one is which.
 USE_DEFAULT_NO = 0   # this entry carries custom statistics
@@ -82,194 +80,11 @@ TOTAL_TECHS_EXPANSION = 44
 TOTAL_SOUNDS = 512
 TOTAL_SWITCHES = 256
 
-#: The flag array is the one field whose unset value is not zero. Keying it by
-#: name keeps every layout a plain triple; it is the only exception there is.
+#: The flag array is the one field in these tables whose unset value is not
+#: zero. It is set on construction, so an entry a short section never reached
+#: reads as "uses the game's defaults" rather than as an all-zero customisation.
 _FLAG_FIELD = "use_default"
-
-Layout = tuple[tuple[str, str, int], ...]
-
-
-class LayoutError(Exception):
-    """A layout in this module disagrees with the published section size."""
-
-
-def _fill_value(name: str) -> int:
-    return USE_DEFAULT_YES if name == _FLAG_FIELD else 0
-
-
-def _layout_size(layout: Layout) -> int:
-    return sum(_WIDTH[code] * count for _, code, count in layout)
-
-
-def _unpack(data: bytes, layout: Layout) -> dict[str, list[int]]:
-    """Read parallel arrays, tolerating a section shorter than the layout.
-
-    Two details matter for a short section, and both are about not inventing
-    data. A gap is filled with the field's *unset* value -- 1 for the flag
-    arrays, 0 elsewhere -- so a truncated table reads as "uses defaults" rather
-    than as an explicit customisation with all-zero stats. And a final element
-    the section cuts through is zero-*extended* rather than dropped: these are
-    little-endian, so the bytes that are present keep their value.
-    """
-    out: dict[str, list[int]] = {}
-    offset = 0
-    for name, code, count in layout:
-        width = _WIDTH[code]
-        need = width * count
-        chunk = data[offset : offset + need]
-        whole, part = divmod(len(chunk), width)
-        values = list(struct.unpack_from(f"<{whole}{code}", chunk)) if whole else []
-        if part:
-            # Keep the low-order bytes the file actually contained.
-            tail = chunk[whole * width :].ljust(width, b"\x00")
-            values.extend(struct.unpack(f"<{code}", tail))
-        values.extend([_fill_value(name)] * (count - len(values)))
-        out[name] = values
-        offset += need
-    return out
-
-
-def _pack(arrays: dict[str, list[int]], layout: Layout) -> bytes:
-    parts = []
-    for name, code, count in layout:
-        try:
-            values = arrays[name]
-        except KeyError:
-            raise ValueError(f"no {name} array to write") from None
-        if len(values) != count:
-            raise ValueError(
-                f"{name} has {len(values)} entries, expected exactly {count}"
-            )
-        try:
-            parts.append(struct.pack(f"<{count}{code}", *values))
-        except struct.error as exc:
-            # Name the field rather than leaving the caller a format code.
-            bad = next(
-                (i for i, v in enumerate(values) if not 0 <= v <= _LIMIT[code]), None
-            )
-            if bad is None:
-                raise
-            raise ValueError(
-                f"{name}[{bad}] = {values[bad]} does not fit a {code!r} field "
-                f"(0..{_LIMIT[code]})"
-            ) from exc
-    return b"".join(parts)
-
-
-@dataclass(slots=True)
-class _ArrayTable:
-    """A fixed-size section of parallel arrays.
-
-    Writing follows the same rule as the terrain grids, and for the same reason:
-    an untouched table re-emits its original bytes verbatim, so a short or
-    oversized section round-trips exactly; an edited one emits the full layout,
-    because splicing back into a short section would silently discard an edit
-    that landed past its end. Bytes an oversized section carried past the layout
-    are carried through an edit rather than truncated away.
-    """
-
-    arrays: dict[str, list[int]] = field(default_factory=dict, repr=False)
-    raw: bytes = field(default=b"", repr=False)
-    section: Section | None = field(default=None, repr=False)
-    modified: bool = False
-
-    SECTION: ClassVar[str] = ""
-    LAYOUT: ClassVar[Layout] = ()
-
-    #: Fields whose index means something other than this table's own entity.
-    #: Everything absent from this map has one element per unit, upgrade, tech,
-    #: switch or sound. A consumer cannot infer this from array length, because
-    #: length does not separate the two cases: ``UPGx``'s single pad byte is the
-    #: only field whose count differs from the upgrade count, so guessing from
-    #: length alone calls a changed pad byte a changed weapon.
-    INDEXED_BY: ClassVar[dict[str, str]] = {}
-
-    def __post_init__(self) -> None:
-        # A table built directly rather than read from a section starts as a
-        # valid all-defaults one, so it can be normalized into a new section.
-        if not self.arrays and self.LAYOUT:
-            self.arrays = {
-                name: [_fill_value(name)] * count for name, _, count in self.LAYOUT
-            }
-
-    @classmethod
-    def nominal_size(cls) -> int:
-        return _layout_size(cls.LAYOUT)
-
-    @classmethod
-    def field_offset(cls, name: str) -> int:
-        """Byte offset of a field within the section. Used by the tests to pin
-        layout *order*, which no round-trip can check."""
-        offset = 0
-        for field_name, code, count in cls.LAYOUT:
-            if field_name == name:
-                return offset
-            offset += _WIDTH[code] * count
-        raise KeyError(f"{cls.SECTION} has no {name} field")
-
-    @classmethod
-    def from_section(cls, section: Section) -> "_ArrayTable":
-        return cls(_unpack(section.data, cls.LAYOUT), section.data, section)
-
-    def __getitem__(self, name: str) -> list[int]:
-        return self.arrays[name]
-
-    def __contains__(self, name: str) -> bool:
-        return name in self.arrays
-
-    def _check(self, name: str, index: int) -> str:
-        for field_name, code, count in self.LAYOUT:
-            if field_name == name:
-                if not 0 <= index < count:
-                    raise IndexError(
-                        f"{self.SECTION}.{name}[{index}] is outside 0..{count - 1}"
-                    )
-                return code
-        raise KeyError(f"{self.SECTION} has no {name} field")
-
-    def set(self, name: str, index: int, value: int) -> None:
-        """Assign one entry.
-
-        Use this rather than mutating ``arrays`` directly, so the table knows it
-        has to re-emit its full layout on write. The index and the value are
-        both checked here: a negative index would otherwise wrap silently to the
-        far end of the array, and an oversized value would be accepted now and
-        surface much later as a ``struct.error`` from a table that can no longer
-        be written at all.
-        """
-        code = self._check(name, index)
-        if not 0 <= value <= _LIMIT[code]:
-            raise ValueError(
-                f"{self.SECTION}.{name}[{index}] = {value} does not fit a "
-                f"{code!r} field (0..{_LIMIT[code]})"
-            )
-        self.arrays[name][index] = value
-        self.modified = True
-
-    @property
-    def is_short(self) -> bool:
-        """The section held fewer bytes than the layout, so some entries were
-        filled in rather than read."""
-        return len(self.raw) < self.nominal_size()
-
-    @property
-    def is_oversized(self) -> bool:
-        """The section held more bytes than the layout. They are preserved, but
-        nothing here interprets them."""
-        return len(self.raw) > self.nominal_size()
-
-    @property
-    def trailing_bytes(self) -> bytes:
-        """Whatever an oversized section carried past the layout."""
-        return self.raw[self.nominal_size() :]
-
-    def to_bytes(self, *, normalize: bool = False) -> bytes:
-        # The verbatim path exists to preserve a real section's original bytes.
-        # A table built directly has no such bytes to preserve, so it packs --
-        # otherwise synthesising a section would silently produce an empty one.
-        if not normalize and not self.modified and self.section is not None:
-            return bytes(self.raw)
-        return _pack(self.arrays, self.LAYOUT) + self.trailing_bytes
+_SETTINGS_FILL: FillMap = {_FLAG_FIELD: USE_DEFAULT_YES}
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +103,7 @@ class SoundPaths(_ArrayTable):
     """
 
     SECTION: ClassVar[str] = "WAV"
+    ENTITY: ClassVar[str] = "sound"
     LAYOUT: ClassVar[Layout] = (("sound_string_ids", "I", TOTAL_SOUNDS),)
 
     @property
@@ -304,6 +120,7 @@ class SwitchNames(_ArrayTable):
     """``SWNM`` -- 256 ``u32`` string ids, one per switch (SPEC 5.6)."""
 
     SECTION: ClassVar[str] = "SWNM"
+    ENTITY: ClassVar[str] = "switch"
     LAYOUT: ClassVar[Layout] = (("switch_string_ids", "I", TOTAL_SWITCHES),)
 
     @property
@@ -351,6 +168,8 @@ class UnitSettings(_ArrayTable):
     """
 
     SECTION: ClassVar[str] = "UNIS"
+    ENTITY: ClassVar[str] = "unit"
+    FILL: ClassVar[FillMap] = _SETTINGS_FILL
     LAYOUT: ClassVar[Layout] = _unit_layout(TOTAL_WEAPONS_ORIGINAL)
 
     #: The damage arrays are indexed by weapon, not by unit, and are shorter
@@ -445,6 +264,8 @@ class UpgradeSettings(_ArrayTable):
     """``UPGS`` -- 46 upgrades, 598 bytes (SPEC 5.8)."""
 
     SECTION: ClassVar[str] = "UPGS"
+    ENTITY: ClassVar[str] = "upgrade"
+    FILL: ClassVar[FillMap] = _SETTINGS_FILL
     LAYOUT: ClassVar[Layout] = _upgrade_layout(TOTAL_UPGRADES_ORIGINAL, pad=0)
 
     def uses_defaults(self, upgrade: int) -> bool:
@@ -493,6 +314,8 @@ class TechSettings(_ArrayTable):
     """
 
     SECTION: ClassVar[str] = "TECS"
+    ENTITY: ClassVar[str] = "tech"
+    FILL: ClassVar[FillMap] = _SETTINGS_FILL
     LAYOUT: ClassVar[Layout] = _tech_layout(TOTAL_TECHS_ORIGINAL)
 
     def uses_defaults(self, tech: int) -> bool:
@@ -511,7 +334,7 @@ class TechSettingsExpansion(TechSettings):
     LAYOUT: ClassVar[Layout] = _tech_layout(TOTAL_TECHS_EXPANSION)
 
 
-SETTINGS_SECTIONS: dict[bytes, type] = {
+SETTINGS_SECTIONS: dict[bytes, type[_ArrayTable]] = {
     b"WAV ": SoundPaths,
     b"SWNM": SwitchNames,
     b"UNIS": UnitSettings,
@@ -523,7 +346,7 @@ SETTINGS_SECTIONS: dict[bytes, type] = {
 }
 
 
-def settings_for(chk, name: str | bytes):
+def settings_for(chk: Chk, name: str | bytes) -> _ArrayTable | None:
     """Return the settings table for section ``name``, or ``None``.
 
     Duplicates resolve last-wins. These sections are not in SPEC 1.5's

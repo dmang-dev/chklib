@@ -22,11 +22,11 @@ import pathlib
 import struct
 
 import pytest
+from conftest import installed_maps
 
 from chklib import Chk
 from chklib.records import IsomRect
 from chklib.views import IsomGrid, isom_for
-from conftest import installed_maps
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -211,7 +211,7 @@ INSTALLED = installed_maps()
 
 
 def _real_chks():
-    from chklib.mpq import MpqArchive, SCENARIO_PATH
+    from chklib.mpq import SCENARIO_PATH, MpqArchive
 
     for path in CORPUS:
         yield path.name, Chk.from_bytes(path.read_bytes())

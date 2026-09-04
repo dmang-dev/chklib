@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chklib"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read/write library for StarCraft map data (CHK), with a diff-oriented CLI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,7 +51,7 @@ chkdiff = "chklib.cli:main"
 # real .scm/.scx archives. It is deliberately not a runtime dependency, and an
 # independent implementation is preferable for generating our own test corpus.
 fixtures = ["eudplib>=0.80,<0.81"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.14", "mypy>=1.11"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chklib"]
@@ -65,3 +65,34 @@ include = ["src/", "tests/", "tools/", "docs/", "README.md", "LICENSE", "pyproje
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# Vendored third-party sources, kept for cross-checking format claims. They are
+# other projects' code and are never edited here.
+extend-exclude = ["reference", ".research"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "BLE", "RUF"]
+ignore = [
+    # __all__ here is grouped by concept, with a comment over each group, so it
+    # reads as a map of the package. Sorting it alphabetically would interleave
+    # the groups and lose that, which costs more than the ordering gains.
+    "RUF022",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# __init__ exists to give the package one flat public surface; every name it
+# imports is re-exported through __all__ rather than used in the module.
+"src/chklib/__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/chklib"]
+exclude = ["^reference/", "^\\.research/"]
+# The package ships py.typed and claims Typing :: Typed, so the annotations are
+# a promise to callers rather than a convenience. These settings check that the
+# promise holds without demanding annotations the tests do not need.
+strict = true
+warn_unreachable = true

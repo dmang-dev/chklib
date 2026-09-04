@@ -30,8 +30,8 @@ could not interpret is preserved in :attr:`Chk.trailing`.
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator, Sequence
 
 __all__ = ["Chk", "Section", "Diagnostic", "SECTION_HEADER_SIZE"]
 
@@ -130,7 +130,7 @@ class Chk:
     # -- reading ----------------------------------------------------------
 
     @classmethod
-    def from_bytes(cls, raw: bytes) -> "Chk":
+    def from_bytes(cls, raw: bytes) -> Chk:
         """Parse ``raw``. Never raises on malformed input."""
         sections: list[Section] = []
         diagnostics: list[Diagnostic] = []

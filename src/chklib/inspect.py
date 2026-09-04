@@ -28,9 +28,11 @@ this library does not read.
 
 from __future__ import annotations
 
+import enum
 import hashlib
-from typing import Iterable
+from collections.abc import Iterable
 
+from ._tables import ArrayTable
 from .chk import Chk
 from .enums import (
     ActionType,
@@ -41,7 +43,8 @@ from .enums import (
     Tileset,
 )
 from .records import Action, Condition, Trigger
-from .settings import SoundPaths, UnitSettings, settings_for
+from .restrictions import TOTAL_PLAYERS, restrictions_for
+from .settings import SoundPaths, SwitchNames, UnitSettings, settings_for
 from .views import (
     Dimensions,
     Forces,
@@ -55,7 +58,7 @@ from .views import (
 
 __all__ = ["render", "FORMAT_VERSION"]
 
-FORMAT_VERSION = 6
+FORMAT_VERSION = 7
 """Bumped when the output shape changes in a way that would churn every diff.
 
 v2 added the ``[terrain]`` block; v3 added ISOM to it; v4 renamed the
@@ -99,9 +102,9 @@ def _quote(raw: bytes | None) -> str:
     return "".join(out)
 
 
-def _enum_name(enum_cls, value: int) -> str:
+def _enum_name(enum_cls: type[enum.Enum], value: int) -> str:
     try:
-        return enum_cls(value).name
+        return str(enum_cls(value).name)
     except ValueError:
         return f"Unknown{value}"
 
@@ -238,7 +241,8 @@ def render(chk: Chk, *, source: str | None = None) -> str:
             if forces is not None and player < len(forces.player_force):
                 bits.append(f"force={forces.player_force[player] + 1}")
             out.append("  ".join(bits))
-        if iown is not None and ownr is not None and bytes(iown.slot_types) != bytes(ownr.slot_types):
+        if (iown is not None and ownr is not None
+                and bytes(iown.slot_types) != bytes(ownr.slot_types)):
             # No source states a precedence rule, so a disagreement is surfaced.
             out.append(f"note         IOWN differs from OWNR: {list(iown.slot_types)}")
 
@@ -351,7 +355,7 @@ def render(chk: Chk, *, source: str | None = None) -> str:
             terrain_lines.append(f"  ISOM row {y:>3}  {digest}")
 
     if terrain_lines:
-        out += ["", "[terrain]"] + terrain_lines
+        out += ["", "[terrain]", *terrain_lines]
 
     # -- settings ----------------------------------------------------------
     # Only customised entries are listed. These tables are ~4 KB of mostly
@@ -366,10 +370,10 @@ def render(chk: Chk, *, source: str | None = None) -> str:
     # than being verbose.
     settings_lines: list[str] = []
 
-    def _digest(table) -> str:
+    def _digest(table: ArrayTable) -> str:
         return hashlib.sha1(table.to_bytes()).hexdigest()[:8]
 
-    def _note(table) -> str:
+    def _note(table: ArrayTable) -> str:
         if table.is_short:
             return "  [short]"
         if table.is_oversized:
@@ -380,10 +384,10 @@ def render(chk: Chk, *, source: str | None = None) -> str:
         table = settings_for(chk, name)
         if table is None:
             continue
-        flags = table["use_default"]
-        custom = [i for i, v in enumerate(flags) if not v]
+        use_default = table["use_default"]
+        custom = [i for i, v in enumerate(use_default) if not v]
         settings_lines.append(
-            f"{name}  {len(custom)} of {len(flags)} customised"
+            f"{name}  {len(custom)} of {len(use_default)} customised"
             f"{_note(table)}  sha={_digest(table)}"
         )
         for index in custom:
@@ -429,12 +433,12 @@ def render(chk: Chk, *, source: str | None = None) -> str:
             continue
         # Through the named accessors rather than the arrays dict, whose first
         # entry is only coincidentally the one wanted.
-        ids = (
-            table.sound_string_ids
-            if isinstance(table, SoundPaths)
-            else table.switch_string_ids
-        )
-        used = table.used_slots() if isinstance(table, SoundPaths) else table.named_switches()
+        if isinstance(table, SoundPaths):
+            ids, used = table.sound_string_ids, table.used_slots()
+        elif isinstance(table, SwitchNames):
+            ids, used = table.switch_string_ids, table.named_switches()
+        else:  # pragma: no cover - the loop only visits those two
+            continue
         settings_lines.append(
             f"{name}  {len(used)} {label} named{_note(table)}  sha={_digest(table)}"
         )
@@ -444,7 +448,72 @@ def render(chk: Chk, *, source: str | None = None) -> str:
             )
 
     if settings_lines:
-        out += ["", "[settings]"] + settings_lines
+        out += ["", "[settings]", *settings_lines]
+
+    # -- restrictions ------------------------------------------------------
+    # Per-player, and mostly defaults, so the same rule as the settings block:
+    # summarise, then name only what a mapper actually changed. A player is
+    # "customised" when some entry of theirs is not left to the game's default.
+    restriction_lines: list[str] = []
+    for name in ("PUNI", "UPGR", "PUPx", "PTEC", "PTEx"):
+        table = restrictions_for(chk, name)
+        if table is None:
+            continue
+        flag_field = next(
+            f for f, _c, _n in type(table).LAYOUT if f.endswith("uses_default")
+            or f.startswith("player_uses_defaults")
+        )
+        custom = table.customised_players(flag_field)
+        restriction_lines.append(
+            f"{name}  {len(custom)} of {TOTAL_PLAYERS} players customised"
+            f"{_note(table)}  sha={_digest(table)}"
+        )
+        for player in custom:
+            player_row = table[flag_field][
+                player * table.PER_PLAYER:(player + 1) * table.PER_PLAYER
+            ]
+            entries = [i for i, v in enumerate(player_row) if not v]
+            shown = ", ".join(str(i) for i in entries[:12])
+            more = f" (+{len(entries) - 12} more)" if len(entries) > 12 else ""
+            restriction_lines.append(
+                f"  {name} player {player:>2}  "
+                f"{len(entries)} custom {table.ENTITY}(s): {shown}{more}"
+            )
+
+    if restriction_lines:
+        out += ["", "[restrictions]", *restriction_lines]
+
+    # -- everything else ---------------------------------------------------
+    # A digest per remaining typed section. These carry no field a reader would
+    # scan for, but they do change, and for a textconv driver an invisible
+    # change is worse than a noisy one -- a repainted doodad or a swapped player
+    # colour has to show up as *something*.
+    other_lines: list[str] = []
+    for name in ("TYPE", "IVER", "IVE2", "VCOD", "COLR", "CRGB",
+                 "UPRP", "UPUS", "DD2"):
+        other = chk.last(name)
+        if other is None:
+            continue
+        data = bytes(other.data)
+        note = ""
+        if name == "VCOD":
+            view = view_for(chk, "VCOD")
+            note = "  standard" if view is not None and view.is_standard else "  CUSTOM"
+        elif name == "DD2":
+            whole, part = divmod(len(data), 8)
+            note = f"  {whole} doodads" + (f" +{part} trailing bytes" if part else "")
+        elif name == "UPUS":
+            view = view_for(chk, "UPUS")
+            note = f"  {len(view.used_slots())} slots used" if view is not None else ""
+        elif name == "TYPE":
+            note = f"  {data.decode('latin-1', 'replace')}"
+        other_lines.append(
+            f"{name:<5} {len(data):>5} bytes  "
+            f"sha={hashlib.sha1(data).hexdigest()[:8]}{note}"
+        )
+
+    if other_lines:
+        out += ["", "[other sections]", *other_lines]
 
     # -- units -------------------------------------------------------------
     units = view_for(chk, "UNIT")

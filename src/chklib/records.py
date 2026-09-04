@@ -21,17 +21,36 @@ layout fails immediately rather than corrupting maps.
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass, fields
-from typing import ClassVar, Iterator, Sequence
+from typing import ClassVar, TypeVar
+
+#: Binds ``from_bytes``/``unpack_all`` to the subclass they were called on, so
+#: ``Condition.from_bytes(...)`` is a ``Condition`` rather than a bare
+#: ``Record``. ``typing.Self`` would say this more directly but is 3.11+, and
+#: this package supports 3.10.
+_RecordT = TypeVar("_RecordT", bound="Record")
 
 __all__ = [
     "Record", "Unit", "Sprite", "Location", "Condition", "Action", "Trigger",
-    "MAX_CONDITIONS", "MAX_ACTIONS", "MAX_OWNERS",
+    "Cuwp", "Doodad",
+    "MAX_CONDITIONS", "MAX_ACTIONS", "MAX_OWNERS", "MAX_CUWPS",
+    "DOODAD_ENABLED", "DOODAD_DISABLED",
 ]
 
 MAX_CONDITIONS = 16
 MAX_ACTIONS = 64
 MAX_OWNERS = 27
+
+#: ``Sc::Unit::MaxCuwps`` (Chkdraft ``sc.h:408``). ``UPRP`` holds exactly this
+#: many slots and ``UPUS`` exactly this many used-flags.
+MAX_CUWPS = 64
+
+#: ``Chk::Doodad::Enabled`` (Chkdraft ``chk.h:319``). Inverted, like
+#: ``UseDefault``: the byte is a *disabled* flag wearing an enabled name, so a
+#: doodad written with 1 is switched off. A synthesised doodad wants 0.
+DOODAD_ENABLED = 0
+DOODAD_DISABLED = 1
 
 
 class Record:
@@ -44,18 +63,18 @@ class Record:
     _STRUCT: ClassVar[struct.Struct]
 
     @classmethod
-    def from_bytes(cls, raw: bytes) -> "Record":
+    def from_bytes(cls: type[_RecordT], raw: bytes) -> _RecordT:
         if len(raw) != cls.SIZE:
             raise ValueError(
                 f"{cls.__name__} is {cls.SIZE} bytes, got {len(raw)}"
             )
-        return cls(*cls._STRUCT.unpack(raw))  # type: ignore[call-arg]
+        return cls(*cls._STRUCT.unpack(raw))
 
     def to_bytes(self) -> bytes:
         return self._STRUCT.pack(*(getattr(self, f.name) for f in fields(self)))  # type: ignore[arg-type]
 
     @classmethod
-    def unpack_all(cls, raw: bytes) -> tuple[list["Record"], bytes]:
+    def unpack_all(cls: type[_RecordT], raw: bytes) -> tuple[list[_RecordT], bytes]:
         """Split ``raw`` into whole records plus any trailing partial bytes.
 
         A trailing partial record is preserved rather than dropped or padded out
@@ -341,7 +360,7 @@ class Trigger:
     current_action: int
 
     @classmethod
-    def from_bytes(cls, raw: bytes) -> "Trigger":
+    def from_bytes(cls, raw: bytes) -> Trigger:
         if len(raw) != cls.SIZE:
             raise ValueError(f"Trigger is {cls.SIZE} bytes, got {len(raw)}")
         conditions = [
@@ -379,7 +398,7 @@ class Trigger:
         )
 
     @classmethod
-    def unpack_all(cls, raw: bytes) -> tuple[list["Trigger"], bytes]:
+    def unpack_all(cls, raw: bytes) -> tuple[list[Trigger], bytes]:
         """Split into whole triggers plus trailing partial bytes.
 
         Chkdraft's own comment hedges on whether a trailing partial trigger can
@@ -413,12 +432,90 @@ class Trigger:
         return [i for i, b in enumerate(self.owners) if b]
 
 
+@dataclass(slots=True)
+class Cuwp(Record):
+    """One "create unit with properties" slot in ``UPRP`` -- 20 bytes.
+
+    A ``CreateUnitWithProperties`` trigger action does not carry the properties
+    it applies; it carries an *index* into this table. Without ``UPRP`` such an
+    action can be named but not explained, which is why these 64 slots matter
+    out of proportion to their size.
+
+    The two ``valid_*`` words are masks saying which of the remaining fields the
+    game should actually apply -- a slot with ``hitpoint_percent = 100`` and the
+    hitpoints bit clear leaves hitpoints alone rather than setting them to 100.
+
+    ``unknown`` is named as Chkdraft names it, and is modelled rather than
+    skipped for the usual reason: it is four real bytes that must survive a
+    round-trip. Confidence A -- openbw reads the same ten fields in the same
+    order (``bwgame.h:21665-21687``), independently of Chkdraft.
+    """
+
+    SIZE: ClassVar[int] = 20
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<HHBBBBIHHI")
+
+    valid_state_flags: int
+    valid_field_flags: int
+    owner: int
+    hitpoint_percent: int
+    shield_percent: int
+    energy_percent: int
+    resource_amount: int
+    hangar_amount: int
+    state_flags: int
+    unknown: int
+
+    @property
+    def is_used(self) -> bool:
+        """Whether this slot carries anything at all.
+
+        A slot's real authority is the matching ``UPUS`` byte; this is the
+        weaker structural test, for when ``UPUS`` is absent.
+        """
+        return self.to_bytes() != bytes(self.SIZE)
+
+
+@dataclass(slots=True)
+class Doodad(Record):
+    """A ``DD2`` entry -- 8 bytes.
+
+    Editor-only: no engine reads ``DD2``, and openbw registers no handler for
+    it. It is modelled so a map that carries doodads survives an edit with them
+    intact, not because the game consults it.
+
+    ``xc``/``yc`` are **pixel** coordinates of the doodad's centre, matching
+    ``UNIT`` and ``THG2`` rather than the tile coordinates a doodad's placement
+    grid might suggest.
+
+    ``enabled`` is inverted -- see :data:`DOODAD_ENABLED`. Use
+    :attr:`is_enabled` rather than the raw byte.
+    """
+
+    SIZE: ClassVar[int] = 8
+    _STRUCT: ClassVar[struct.Struct] = struct.Struct("<HHHBB")
+
+    type: int
+    xc: int
+    yc: int
+    owner: int
+    enabled: int
+
+    @property
+    def is_enabled(self) -> bool:
+        """Whether the doodad is switched on.
+
+        The stored byte is 0 for enabled and 1 for disabled, so ``bool(enabled)``
+        is exactly backwards and this is not a convenience wrapper.
+        """
+        return self.enabled == DOODAD_ENABLED
+
+
 # ---------------------------------------------------------------------------
 # Layout assertions - a mistranscribed offset must fail at import, not at write
 # ---------------------------------------------------------------------------
 
 def _assert_layout() -> None:
-    for cls in (Unit, Sprite, Location, Condition, Action):
+    for cls in (Unit, Sprite, Location, Condition, Action, Cuwp, Doodad):
         assert cls._STRUCT.size == cls.SIZE, (
             f"{cls.__name__}: struct is {cls._STRUCT.size} bytes, SIZE says {cls.SIZE}"
         )
@@ -440,6 +537,9 @@ def _assert_layout() -> None:
     assert Trigger._FLAGS_AT == Trigger._ACTIONS_AT + MAX_ACTIONS * Action.SIZE
     assert Trigger._OWNERS_AT == Trigger._FLAGS_AT + 4
     assert Trigger._CURRENT_ACTION_AT == Trigger._OWNERS_AT + MAX_OWNERS
+    # UPRP is exactly MAX_CUWPS slots and UPUS exactly MAX_CUWPS bytes.
+    assert MAX_CUWPS * Cuwp.SIZE == 1280
+    assert DOODAD_ENABLED != DOODAD_DISABLED
 
 
 _assert_layout()

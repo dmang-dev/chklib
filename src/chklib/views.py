@@ -16,28 +16,36 @@ of the original bytes, so the original length and any trailing content survive.
 
 from __future__ import annotations
 
+import hashlib
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import ClassVar, Iterator
+from typing import Any, ClassVar, Protocol
 
 from .chk import Chk, Section
-from .settings import SETTINGS_SECTIONS, settings_for
 from .records import (
-    Action,
-    Condition,
+    MAX_CUWPS,
+    Cuwp,
+    Doodad,
     IsomRect,
     Location,
+    Record,
     Sprite,
     Trigger,
     Unit,
 )
+from .restrictions import RESTRICTION_SECTIONS, restrictions_for
+from .settings import SETTINGS_SECTIONS, settings_for
 
 __all__ = [
     "Dimensions", "PlayerSlots", "PlayerRaces", "ScenarioProperties", "Forces",
     "Version", "TilesetRef", "RecordArrayView", "TriggerListView",
     "StringTableView", "StringTable", "TileGrid", "FogGrid", "IsomGrid",
     "terrain_for", "isom_for",
-    "view_for", "string_table_for", "settings_for", "TYPED_SECTIONS",
+    "ScenarioType", "EditorVersion", "ValidationCode", "PlayerColors",
+    "RemasteredColors", "CuwpUsage",
+    "view_for", "string_table_for", "settings_for", "restrictions_for",
+    "TYPED_SECTIONS",
 ]
 
 _U16 = struct.Struct("<H")
@@ -45,6 +53,18 @@ _U16X2 = struct.Struct("<HH")
 _U32 = struct.Struct("<I")
 
 PIXELS_PER_TILE = 32
+
+
+class _SectionReader(Protocol):
+    """What the dispatch tables below hold: a class that reads one section.
+
+    A Protocol rather than a base class because these do not share one --
+    ``StringTableView`` is not a ``_ScalarView`` -- and rather than a bare
+    ``type``, which loses ``from_section`` entirely and makes every lookup an
+    error at the call site.
+    """
+
+    def from_section(self, section: Section) -> Any: ...
 
 
 def _splice(original: bytes, packed: bytes) -> bytes:
@@ -111,7 +131,7 @@ class Dimensions(_ScalarView):
     tile_height: int = 0
 
     @classmethod
-    def from_section(cls, section: Section) -> "Dimensions":
+    def from_section(cls, section: Section) -> Dimensions:
         width, height = _U16X2.unpack(_padded(section.data, 4)[:4])
         return cls(raw=section.data, section=section, tile_width=width, tile_height=height)
 
@@ -149,7 +169,7 @@ class PlayerSlots(_ScalarView):
     slot_types: bytes = b""
 
     @classmethod
-    def from_section(cls, section: Section) -> "PlayerSlots":
+    def from_section(cls, section: Section) -> PlayerSlots:
         return cls(raw=section.data, section=section,
                    slot_types=_padded(section.data, 12)[:12])
 
@@ -178,7 +198,7 @@ class PlayerRaces(_ScalarView):
     races: bytes = b""
 
     @classmethod
-    def from_section(cls, section: Section) -> "PlayerRaces":
+    def from_section(cls, section: Section) -> PlayerRaces:
         return cls(raw=section.data, section=section,
                    races=_padded(section.data, 12)[:12])
 
@@ -207,7 +227,7 @@ class ScenarioProperties(_ScalarView):
     description_string_id: int = 0
 
     @classmethod
-    def from_section(cls, section: Section) -> "ScenarioProperties":
+    def from_section(cls, section: Section) -> ScenarioProperties:
         name, description = _U16X2.unpack(_padded(section.data, 4)[:4])
         return cls(raw=section.data, section=section,
                    name_string_id=name, description_string_id=description)
@@ -237,7 +257,7 @@ class Forces(_ScalarView):
     flags: bytes = b""
 
     @classmethod
-    def from_section(cls, section: Section) -> "Forces":
+    def from_section(cls, section: Section) -> Forces:
         unpacked = cls._STRUCT.unpack(_padded(section.data, 20)[:20])
         return cls(
             raw=section.data,
@@ -275,7 +295,7 @@ class Version(_ScalarView):
     }
 
     @classmethod
-    def from_section(cls, section: Section) -> "Version":
+    def from_section(cls, section: Section) -> Version:
         return cls(raw=section.data, section=section,
                    value=_U16.unpack(_padded(section.data, 2)[:2])[0])
 
@@ -301,7 +321,7 @@ class TilesetRef(_ScalarView):
     value: int = 0
 
     @classmethod
-    def from_section(cls, section: Section) -> "TilesetRef":
+    def from_section(cls, section: Section) -> TilesetRef:
         return cls(raw=section.data, section=section,
                    value=_U16.unpack(_padded(section.data, 2)[:2])[0])
 
@@ -327,13 +347,15 @@ class RecordArrayView:
     that was never in the input (SPEC 7.7).
     """
 
-    record_type: type
-    records: list
+    record_type: type[Record]
+    records: list[Record]
     trailing: bytes = b""
     section: Section | None = field(default=None, repr=False)
 
     @classmethod
-    def from_section(cls, section: Section, record_type: type) -> "RecordArrayView":
+    def from_section(
+        cls, section: Section, record_type: type[Record]
+    ) -> RecordArrayView:
         records, trailing = record_type.unpack_all(section.data)
         return cls(record_type, records, trailing, section)
 
@@ -343,10 +365,10 @@ class RecordArrayView:
     def __len__(self) -> int:
         return len(self.records)
 
-    def __iter__(self) -> Iterator:
+    def __iter__(self) -> Iterator[Record]:
         return iter(self.records)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> Record:
         return self.records[index]
 
     @property
@@ -369,7 +391,7 @@ class TriggerListView:
     section: Section | None = field(default=None, repr=False)
 
     @classmethod
-    def from_section(cls, section: Section, is_briefing: bool = False) -> "TriggerListView":
+    def from_section(cls, section: Section, is_briefing: bool = False) -> TriggerListView:
         triggers, trailing = Trigger.unpack_all(section.data)
         return cls(triggers, is_briefing, trailing, section)
 
@@ -382,7 +404,7 @@ class TriggerListView:
     def __iter__(self) -> Iterator[Trigger]:
         return iter(self.triggers)
 
-    def __getitem__(self, index) -> Trigger:
+    def __getitem__(self, index: int) -> Trigger:
         return self.triggers[index]
 
     @property
@@ -584,7 +606,7 @@ class TileGrid(_Grid):
 
     @classmethod
     def from_section(cls, section: Section, width: int, height: int,
-                     *, data: bytes | None = None, merged: int = 1) -> "TileGrid":
+                     *, data: bytes | None = None, merged: int = 1) -> TileGrid:
         raw = section.data
         source = raw if data is None else data
         width, height, clamped = cls._fit(width, height)
@@ -638,7 +660,7 @@ class FogGrid(_Grid):
 
     @classmethod
     def from_section(cls, section: Section, width: int, height: int,
-                     *, data: bytes | None = None, merged: int = 1) -> "FogGrid":
+                     *, data: bytes | None = None, merged: int = 1) -> FogGrid:
         raw = section.data
         source = raw if data is None else data
         width, height, clamped = cls._fit(width, height)
@@ -703,7 +725,7 @@ class IsomGrid:
 
     @classmethod
     def from_section(cls, section: Section, tile_width: int,
-                     tile_height: int) -> "IsomGrid":
+                     tile_height: int) -> IsomGrid:
         raw = section.data
         width, height = cls.shape_for(tile_width, tile_height)
         if width <= 0 or height <= 0:
@@ -787,14 +809,14 @@ def isom_for(chk: Chk) -> IsomGrid | None:
 
 
 #: The only sections this module knows how to shape as a tile/fog grid.
-TERRAIN_SECTIONS: dict[bytes, type] = {
+TERRAIN_SECTIONS: dict[bytes, type[TileGrid] | type[FogGrid]] = {
     b"MTXM": TileGrid,
     b"TILE": TileGrid,
     b"MASK": FogGrid,
 }
 
 
-def terrain_for(chk: Chk, name: str | bytes = "MTXM") -> "TileGrid | FogGrid | None":
+def terrain_for(chk: Chk, name: str | bytes = "MTXM") -> TileGrid | FogGrid | None:
     """Return a terrain grid sized from the map's ``DIM``, or ``None``.
 
     ``DIM`` is what gives the grid its shape; the section only supplies cells.
@@ -829,10 +851,11 @@ def terrain_for(chk: Chk, name: str | bytes = "MTXM") -> "TileGrid | FogGrid | N
         data = _merge_override([s.data for s in sections])
         merged = len(sections)
 
-    return grid_cls.from_section(
+    grid: TileGrid | FogGrid = grid_cls.from_section(
         sections[-1], dimensions.tile_width, dimensions.tile_height,
         data=data, merged=merged,
     )
+    return grid
 
 
 # ---------------------------------------------------------------------------
@@ -884,7 +907,7 @@ class StringTableView:
     """True for ``STRx``, whose count and offsets are 32-bit."""
 
     @classmethod
-    def from_section(cls, section: Section, wide: bool = False) -> "StringTableView":
+    def from_section(cls, section: Section, wide: bool = False) -> StringTableView:
         raw = section.data
         width = 4 if wide else 2
         unpack = _U32 if wide else _U16
@@ -993,7 +1016,7 @@ class StringTable:
     MAX_IDS_WIDE: ClassVar[int] = 1073741822
 
     @classmethod
-    def from_view(cls, view: StringTableView) -> "StringTable":
+    def from_view(cls, view: StringTableView) -> StringTable:
         """Copy a parsed table into an editable one."""
         present = {}
         for string_id in range(1, view.count + 1):
@@ -1140,11 +1163,256 @@ TYPED_SECTIONS: dict[str, str] = {
     "UPGx": "UpgradeSettings (expansion, +1 pad byte)",
     "TECS": "TechSettings",
     "TECx": "TechSettings (expansion)",
+    "PUNI": "UnitRestrictions",
+    "UPGR": "UpgradeRestrictions",
+    "PUPx": "UpgradeRestrictions (expansion)",
+    "PTEC": "TechRestrictions",
+    "PTEx": "TechRestrictions (expansion)",
+    "UPRP": "RecordArrayView[Cuwp] (trigger unit properties)",
+    "UPUS": "CuwpUsage",
+    "DD2": "RecordArrayView[Doodad] (editor-only)",
+    "COLR": "PlayerColors",
+    "CRGB": "RemasteredColors",
+    "TYPE": "ScenarioType",
+    "IVER": "EditorVersion",
+    "IVE2": "EditorVersion",
+    "VCOD": "ValidationCode",
 }
 """Sections this library interprets, and the view each maps to."""
 
-_RECORD_SECTIONS: dict[str, type] = {"UNIT": Unit, "THG2": Sprite, "MRGN": Location}
-_SCALAR_SECTIONS: dict[str, type] = {
+# ---------------------------------------------------------------------------
+# Versions, validation and colours
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class ScenarioType(_ScalarView):
+    """``TYPE`` -- which product authored the scenario. 4 bytes.
+
+    A four-character tag rather than a number: ``RAWB`` for Brood War, ``RAWS``
+    for vanilla StarCraft. Kept as raw bytes because it is a tag, and comparing
+    it to an integer is the sort of thing that works until a third tag appears.
+
+    Present in 177 of the 488 corpus maps, always exactly 4 bytes, and only ever
+    one of those two values (161 ``RAWB``, 16 ``RAWS``).
+    """
+
+    SECTION: ClassVar[str] = "TYPE"
+    NOMINAL: ClassVar[int] = 4
+
+    tag: bytes = b"RAWB"
+
+    BROOD_WAR: ClassVar[bytes] = b"RAWB"
+    STARCRAFT: ClassVar[bytes] = b"RAWS"
+
+    @classmethod
+    def from_section(cls, section: Section) -> ScenarioType:
+        return cls(raw=section.data, section=section,
+                   tag=bytes(_padded(section.data, 4)[:4]))
+
+    def _pack(self) -> bytes:
+        return self.tag
+
+    @property
+    def is_brood_war(self) -> bool:
+        return self.tag == self.BROOD_WAR
+
+    def __str__(self) -> str:
+        return self.tag.decode("latin-1")
+
+
+@dataclass(slots=True)
+class EditorVersion(_ScalarView):
+    """``IVER`` or ``IVE2`` -- the editor's own version stamps. 2 bytes each.
+
+    Neither is the map's *format* version; that is ``VER``. These say which
+    StarEdit wrote the file, and StarCraft validates neither. In the corpus each
+    is a single constant: ``IVER`` is 10 in all 290 maps that carry it, ``IVE2``
+    is 11 in all 359.
+    """
+
+    SECTION: ClassVar[str] = "IVER"
+    NOMINAL: ClassVar[int] = 2
+
+    version: int = 10
+
+    @classmethod
+    def from_section(cls, section: Section) -> EditorVersion:
+        value = _U16.unpack(_padded(section.data, 2)[:2])[0]
+        return cls(raw=section.data, section=section, version=value)
+
+    def _pack(self) -> bytes:
+        return _U16.pack(self.version)
+
+
+@dataclass(slots=True)
+class ValidationCode(_ScalarView):
+    """``VCOD`` -- the checksum seed table StarCraft validates a map against.
+    1040 bytes: 256 ``u32`` seeds then 16 ``u8`` opcodes.
+
+    Every map carries one and it is very nearly a constant: 483 of the 488
+    corpus maps hold byte-identical payloads, and the first seeds and the opcode
+    order match Chkdraft's literal exactly. The five that differ are the
+    interesting ones -- a non-standard ``VCOD`` is how a map is made to refuse
+    to open in an editor that recomputes it.
+
+    :attr:`is_standard` exists so ``pack`` can *check* this section rather than
+    copy it blindly. The comparison is against a digest rather than an embedded
+    kilobyte of seeds, which keeps the check honest without carrying the table.
+    """
+
+    SECTION: ClassVar[str] = "VCOD"
+    NOMINAL: ClassVar[int] = 1040
+    SEEDS: ClassVar[int] = 256
+    OPCODES: ClassVar[int] = 16
+
+    #: SHA-256 of the payload shared by 483 of 488 corpus maps.
+    STANDARD_DIGEST: ClassVar[str] = (
+        "c13ca25290b5d075eae9705d68a7b8c30af498c36c10e138627f8b49b795392f"
+    )
+
+    seeds: list[int] = field(default_factory=list, repr=False)
+    opcodes: list[int] = field(default_factory=list, repr=False)
+
+    @classmethod
+    def from_section(cls, section: Section) -> ValidationCode:
+        data = _padded(section.data, cls.NOMINAL)
+        return cls(
+            raw=section.data,
+            section=section,
+            seeds=list(struct.unpack_from(f"<{cls.SEEDS}I", data, 0)),
+            opcodes=list(struct.unpack_from(f"<{cls.OPCODES}B", data, cls.SEEDS * 4)),
+        )
+
+    def _pack(self) -> bytes:
+        return (
+            struct.pack(f"<{self.SEEDS}I", *self.seeds)
+            + struct.pack(f"<{self.OPCODES}B", *self.opcodes)
+        )
+
+    @property
+    def is_standard(self) -> bool:
+        """Whether this is the ordinary table nearly every map carries."""
+        return (
+            hashlib.sha256(bytes(self.raw)).hexdigest() == self.STANDARD_DIGEST
+        )
+
+
+@dataclass(slots=True)
+class PlayerColors(_ScalarView):
+    """``COLR`` -- one colour byte per playable slot. 8 bytes.
+
+    Eight, not twelve: these are the playable slots, as in ``FORC``, while
+    ``OWNR`` and the restriction tables run to twelve.
+
+    **The byte is not validated against a named colour.** Chkdraft names 0..11
+    plus two specials, but the corpus carries 14 and 15 as well, and a
+    Remastered map can carry a custom index above that. Anything here that
+    rejected an unnamed value would refuse real maps, so the raw byte is what is
+    modelled and naming it is left to the caller.
+    """
+
+    SECTION: ClassVar[str] = "COLR"
+    NOMINAL: ClassVar[int] = 8
+    SLOTS: ClassVar[int] = 8
+
+    colors: bytes = b""
+
+    @classmethod
+    def from_section(cls, section: Section) -> PlayerColors:
+        return cls(raw=section.data, section=section,
+                   colors=bytes(_padded(section.data, cls.NOMINAL)[: cls.NOMINAL]))
+
+    def _pack(self) -> bytes:
+        return self.colors
+
+
+@dataclass(slots=True)
+class RemasteredColors(_ScalarView):
+    """``CRGB`` -- Remastered per-player custom colours. 32 bytes.
+
+    Eight RGB triples (24 bytes) followed by eight setting bytes saying how each
+    triple is read: 0 random from a predefined set, 1 the player's own choice,
+    2 the custom RGB here, 3 the colour index in the triple's third byte.
+
+    This is the least corroborated section in the library and is labelled so.
+    Only Chkdraft describes it, and unusually it does not annotate the size the
+    way it does every neighbouring section. The corpus supplies the one
+    independent check available: exactly one map of 488 carries a ``CRGB``, it
+    is 32 bytes, and its eight trailing bytes are all 1 -- a uniform, valid
+    setting value, which is what the 24/8 split predicts and what a wrong split
+    would be unlikely to produce.
+
+    The R, G, B order within a triple rests on Chkdraft's accessors alone; the
+    one corpus map has all-zero triples and so cannot distinguish RGB from BGR.
+    """
+
+    SECTION: ClassVar[str] = "CRGB"
+    NOMINAL: ClassVar[int] = 32
+    SLOTS: ClassVar[int] = 8
+
+    USE_PREDEFINED: ClassVar[int] = 0
+    PLAYER_CHOICE: ClassVar[int] = 1
+    CUSTOM_RGB: ClassVar[int] = 2
+    USE_ID: ClassVar[int] = 3
+
+    rgb: bytes = b""
+    settings: bytes = b""
+
+    @classmethod
+    def from_section(cls, section: Section) -> RemasteredColors:
+        data = _padded(section.data, cls.NOMINAL)
+        return cls(raw=section.data, section=section,
+                   rgb=bytes(data[: cls.SLOTS * 3]),
+                   settings=bytes(data[cls.SLOTS * 3 : cls.NOMINAL]))
+
+    def _pack(self) -> bytes:
+        return self.rgb + self.settings
+
+    def color(self, slot: int) -> tuple[int, int, int]:
+        """The RGB triple for one slot, whether or not the setting uses it."""
+        if not 0 <= slot < self.SLOTS:
+            raise IndexError(f"slot {slot} is outside 0..{self.SLOTS - 1}")
+        return (self.rgb[slot * 3], self.rgb[slot * 3 + 1], self.rgb[slot * 3 + 2])
+
+
+@dataclass(slots=True)
+class CuwpUsage(_ScalarView):
+    """``UPUS`` -- which of ``UPRP``'s 64 property slots are in use. 64 bytes.
+
+    A slot's bytes in ``UPRP`` can look plausible while being stale, so this is
+    the authority on which are real. An empty ``UPUS`` is a real thing: 7 of the
+    466 corpus maps that carry one declare it zero-length, which reads here as
+    no slot in use rather than as an error.
+    """
+
+    SECTION: ClassVar[str] = "UPUS"
+    NOMINAL: ClassVar[int] = MAX_CUWPS
+
+    used: bytes = b""
+
+    @classmethod
+    def from_section(cls, section: Section) -> CuwpUsage:
+        return cls(raw=section.data, section=section,
+                   used=bytes(_padded(section.data, cls.NOMINAL)[: cls.NOMINAL]))
+
+    def _pack(self) -> bytes:
+        return self.used
+
+    def used_slots(self) -> list[int]:
+        """Indices of the property slots this map actually uses."""
+        return [i for i, b in enumerate(self.used) if b]
+
+
+_RECORD_SECTIONS: dict[str, type[Record]] = {
+    "UNIT": Unit, "THG2": Sprite, "MRGN": Location,
+    # UPRP is fixed at 64 slots and DD2 is variable, but both are plain
+    # arrays of fixed-size records, so both get the trailing-partial
+    # handling that matters: 7 corpus maps carry a 60-byte DD2, which is
+    # seven whole doodads and half of an eighth.
+    "UPRP": Cuwp, "DD2": Doodad,
+}
+_SCALAR_SECTIONS: dict[str, _SectionReader] = {
     "DIM": Dimensions,
     "VER": Version,
     "ERA": TilesetRef,
@@ -1154,10 +1422,17 @@ _SCALAR_SECTIONS: dict[str, type] = {
     "SPRP": ScenarioProperties,
     "FORC": Forces,
     "STR": StringTableView,
+    "TYPE": ScenarioType,
+    "IVER": EditorVersion,
+    "IVE2": EditorVersion,
+    "VCOD": ValidationCode,
+    "COLR": PlayerColors,
+    "CRGB": RemasteredColors,
+    "UPUS": CuwpUsage,
 }
 
 
-def view_for(chk: Chk, name: str):
+def view_for(chk: Chk, name: str) -> Any:
     """Return a typed view of the *effective* section ``name``, or ``None``.
 
     The effective section is the last one with that name, matching StarCraft's
@@ -1186,6 +1461,8 @@ def view_for(chk: Chk, name: str):
         return isom_for(chk)
     if section.name in SETTINGS_SECTIONS:
         return settings_for(chk, section.name)
+    if section.name in RESTRICTION_SECTIONS:
+        return restrictions_for(chk, section.name)
     view_cls = _SCALAR_SECTIONS.get(key)
     return view_cls.from_section(section) if view_cls else None
 

@@ -11,6 +11,23 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The lowest version the package supports, so mypy resolves the same
+          # stdlib signatures a 3.10 user gets rather than a newer one's.
+          python-version: "3.10"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      # Both are pinned by pyproject, so a rule set cannot drift underneath a
+      # release. --output-format=github annotates the diff on a pull request.
+      - run: python -m ruff check --output-format=github src/ tests/ tools/
+      - run: python -m mypy
+
   test:
     name: test (${{ matrix.python }})
     runs-on: ubuntu-latest
@@ -32,7 +49,9 @@ jobs:
 
   build:
     name: build distributions
-    needs: test
+    # Both gates, not just the tests: a lint or typing failure should stop a
+    # release as surely as a failing test, since the version is spent either way.
+    needs: [lint, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

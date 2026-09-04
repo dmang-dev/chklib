@@ -61,13 +61,13 @@ def _string_table(values: list[bytes]) -> bytes:
 
 
 def a_unit(**kw) -> Unit:
-    defaults = dict(
-        class_id=0, xc=100, yc=200, type=7, relation_flags=0,
-        valid_state_flags=0, valid_field_flags=0, owner=0,
-        hitpoint_percent=100, shield_percent=100, energy_percent=100,
-        resource_amount=0, hangar_amount=0, state_flags=0, unused=0,
-        relation_class_id=0,
-    )
+    defaults = {
+        "class_id": 0, "xc": 100, "yc": 200, "type": 7, "relation_flags": 0,
+        "valid_state_flags": 0, "valid_field_flags": 0, "owner": 0,
+        "hitpoint_percent": 100, "shield_percent": 100, "energy_percent": 100,
+        "resource_amount": 0, "hangar_amount": 0, "state_flags": 0, "unused": 0,
+        "relation_class_id": 0,
+    }
     defaults.update(kw)
     return Unit(**defaults)
 
@@ -142,7 +142,7 @@ def test_inserting_a_unit_does_not_cascade() -> None:
     def churn(existing: int) -> int:
         units = [a_unit(xc=200 + i * 10) for i in range(existing)]
         before = render(minimal_map(units=units))
-        after = render(minimal_map(units=[a_unit(xc=100)] + units))
+        after = render(minimal_map(units=[a_unit(xc=100), *units]))
         return _changed_line_count(before, after)
 
     small, large = churn(2), churn(40)

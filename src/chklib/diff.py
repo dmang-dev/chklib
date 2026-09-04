@@ -35,15 +35,17 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Sequence
+from typing import Any
 
 from .chk import Chk
 from .enums import Race, SlotType, Tileset
-from .inspect import _action_line, _condition_line, _quote, _enum_name
-from .records import Trigger
+from .inspect import _action_line, _condition_line, _enum_name, _quote
+from .records import Location, Sprite, Trigger, Unit
+from .restrictions import restrictions_for
 from .settings import SoundPaths, SwitchNames, settings_for
-from .views import StringTableView, string_table_for, view_for
+from .views import TYPED_SECTIONS, StringTableView, string_table_for, view_for
 
 __all__ = ["Change", "DiffReport", "diff", "JSON_SCHEMA_VERSION"]
 
@@ -98,7 +100,7 @@ class DiffReport:
     def is_empty(self) -> bool:
         return not self.changes
 
-    def add(self, *args, **kwargs) -> None:
+    def add(self, *args: str, **kwargs: str) -> None:
         self.changes.append(Change(*args, **kwargs))
 
     def counts(self) -> dict[str, int]:
@@ -143,7 +145,9 @@ def _string(view: StringTableView | None, string_id: int) -> str:
     return f"#{string_id} {_quote(raw)}" if raw is not None else f"#{string_id} <unreadable>"
 
 
-def _scalar(report: DiffReport, area: str, key: str, before, after) -> None:
+def _scalar(
+    report: DiffReport, area: str, key: str, before: object, after: object
+) -> None:
     if before != after:
         report.add(area, "changed", key, before=str(before), after=str(after))
 
@@ -259,7 +263,7 @@ def _diff_locations(report: DiffReport, a: Chk, b: Chk,
     if va is None or vb is None:
         return
 
-    def describe(loc, strings) -> str:
+    def describe(loc: Location, strings: StringTableView | None) -> str:
         return (
             f"{_string(strings, loc.string_id)} "
             f"({loc.left},{loc.top})-({loc.right},{loc.bottom}) "
@@ -275,20 +279,23 @@ def _diff_locations(report: DiffReport, a: Chk, b: Chk,
             continue
         # Location ids are 1-based: file record k is location id k+1.
         key = f"location {index + 1}"
-        if used_a and not used_b:
+        # `used_a`/`used_b` already imply non-None, but spelling the check out
+        # is what lets a reader -- and a type checker -- see that, at no
+        # runtime cost.
+        if la is not None and used_a and not used_b:
             report.add("MRGN", "removed", key, before=describe(la, sa))
-        elif used_b and not used_a:
+        elif lb is not None and used_b and not used_a:
             report.add("MRGN", "added", key, after=describe(lb, sb))
-        elif la.to_bytes() != lb.to_bytes():
+        elif la is not None and lb is not None and la.to_bytes() != lb.to_bytes():
             report.add("MRGN", "changed", key,
                        before=describe(la, sa), after=describe(lb, sb))
 
 
-def _unit_key(unit) -> tuple:
+def _unit_key(unit: Unit) -> tuple[int, int]:
     return (unit.owner, unit.type)
 
 
-def _unit_describe(unit) -> str:
+def _unit_describe(unit: Unit) -> str:
     bits = [f"p{unit.owner + 1}", f"type={unit.type}", f"at=({unit.xc},{unit.yc})"]
     if unit.valid_field_flags & 0x02:
         bits.append(f"hp={unit.hitpoint_percent}%")
@@ -299,7 +306,13 @@ def _unit_describe(unit) -> str:
     return "  ".join(bits)
 
 
-def _diff_units(report: DiffReport, a: Chk, b: Chk, section: str, describe, key_of) -> None:
+def _diff_units(
+    report: DiffReport, a: Chk, b: Chk, section: str,
+    # Generic over UNIT and THG2 records, which share owner/type/xc/yc but
+    # no subclass beyond Record; the helpers passed in are each specific.
+    describe: Callable[[Any], str],
+    key_of: Callable[[Any], tuple[int, int]],
+) -> None:
     """Multiset comparison, then pair leftovers so a move reads as a change."""
     va, vb = view_for(a, section), view_for(b, section)
     if va is None or vb is None:
@@ -308,7 +321,7 @@ def _diff_units(report: DiffReport, a: Chk, b: Chk, section: str, describe, key_
     # Identical records cancel out first, so only genuine differences remain.
     remaining_a = list(va)
     remaining_b = list(vb)
-    bytes_b: dict[bytes, list] = {}
+    bytes_b: dict[bytes, list[Any]] = {}
     for record in remaining_b:
         bytes_b.setdefault(record.to_bytes(), []).append(record)
     survivors_a = []
@@ -322,7 +335,7 @@ def _diff_units(report: DiffReport, a: Chk, b: Chk, section: str, describe, key_
 
     # Pair the leftovers within (owner, type) groups, ordered by position so the
     # pairing is deterministic.
-    groups: dict[tuple, tuple[list, list]] = {}
+    groups: dict[tuple[int, int], tuple[list[Any], list[Any]]] = {}
     for record in survivors_a:
         groups.setdefault(key_of(record), ([], []))[0].append(record)
     for record in survivors_b:
@@ -332,7 +345,9 @@ def _diff_units(report: DiffReport, a: Chk, b: Chk, section: str, describe, key_
         left, right = groups[group_key]
         left.sort(key=lambda r: (r.xc, r.yc))
         right.sort(key=lambda r: (r.xc, r.yc))
-        for old, new in zip(left, right):
+        # Lengths differ whenever a group gained or lost records; the
+        # leftovers on each side are reported just below.
+        for old, new in zip(left, right, strict=False):
             report.add(section, "changed", describe_key(group_key),
                        before=describe(old), after=describe(new))
         for old in left[len(right):]:
@@ -341,16 +356,16 @@ def _diff_units(report: DiffReport, a: Chk, b: Chk, section: str, describe, key_
             report.add(section, "added", describe_key(group_key), after=describe(new))
 
 
-def describe_key(group_key: tuple) -> str:
+def describe_key(group_key: tuple[int, int]) -> str:
     owner, type_id = group_key
     return f"p{owner + 1} type={type_id}"
 
 
-def _sprite_key(sprite) -> tuple:
+def _sprite_key(sprite: Sprite) -> tuple[int, int]:
     return (sprite.owner, sprite.type)
 
 
-def _sprite_describe(sprite) -> str:
+def _sprite_describe(sprite: Sprite) -> str:
     kind = "unit" if sprite.is_sprite_unit else "sprite"
     return (
         f"p{sprite.owner + 1}  type={sprite.type}  at=({sprite.xc},{sprite.yc})"
@@ -368,7 +383,9 @@ def _trigger_signature(trigger: Trigger) -> str:
     return hashlib.sha1(trigger.to_bytes()).hexdigest()
 
 
-def _trigger_tokens(trigger: Trigger, strings, briefing: bool) -> list[str]:
+def _trigger_tokens(
+    trigger: Trigger, strings: StringTableView | None, briefing: bool
+) -> list[str]:
     """The comparable content of a trigger, one token per line."""
     tokens = [f"owners={sorted(trigger.owner_indices())}", f"flags={trigger.flags}"]
     tokens += [f"if {_condition_line(c)}" for c in trigger.used_conditions()]
@@ -388,7 +405,9 @@ def _diff_trigger_pair(report: DiffReport, area: str, key: str,
         if tag == "equal":
             continue
         if tag == "replace":
-            for old, new in zip(tokens_a[i1:i2], tokens_b[j1:j2]):
+            # A replace opcode can cover ranges of different lengths;
+            # extra_a/extra_b below carry whichever side is longer.
+            for old, new in zip(tokens_a[i1:i2], tokens_b[j1:j2], strict=False):
                 report.add(area, "changed", key, before=old, after=new)
             extra_a = tokens_a[i1 + min(i2 - i1, j2 - j1):i2]
             extra_b = tokens_b[j1 + min(i2 - i1, j2 - j1):j2]
@@ -467,14 +486,6 @@ def _diff_triggers(report: DiffReport, a: Chk, b: Chk, section: str,
 
 
 #: What one entry of each settings table is called, for readable diff keys.
-_SETTINGS_ENTITY = {
-    "UNIS": "unit", "UNIx": "unit",
-    "UPGS": "upgrade", "UPGx": "upgrade",
-    "TECS": "tech", "TECx": "tech",
-    "WAV": "sound", "SWNM": "switch",
-}
-
-
 def _tail(data: bytes) -> str:
     """Describe an uninterpreted trailing tail.
 
@@ -487,9 +498,9 @@ def _tail(data: bytes) -> str:
     return f"{len(data)} bytes sha={hashlib.sha1(data).hexdigest()[:8]}"
 
 
-def _diff_settings(report: DiffReport, a: Chk, b: Chk,
-                   sa: StringTableView | None, sb: StringTableView | None) -> None:
-    """Compare the settings tables entry by entry.
+def _diff_tables(report: DiffReport, a: Chk, b: Chk,
+                 sa: StringTableView | None, sb: StringTableView | None) -> None:
+    """Compare the settings and restriction tables entry by entry.
 
     Without this a map whose only change is a unit's hitpoints or an upgrade's
     cost diffs as no change at all: ``_diff_sections`` compares section names,
@@ -501,15 +512,21 @@ def _diff_settings(report: DiffReport, a: Chk, b: Chk,
     which are indexed by weapon rather than by unit, report against a weapon
     number instead of being forced into a unit row.
     """
-    for name in ("UNIS", "UNIx", "UPGS", "UPGx", "TECS", "TECx", "WAV", "SWNM"):
-        table_a = settings_for(a, name)
-        table_b = settings_for(b, name)
+    lookups = [
+        (name, settings_for)
+        for name in ("UNIS", "UNIx", "UPGS", "UPGx", "TECS", "TECx", "WAV", "SWNM")
+    ] + [
+        (name, restrictions_for)
+        for name in ("PUNI", "UPGR", "PUPx", "PTEC", "PTEx")
+    ]
+    for name, lookup in lookups:
+        table_a = lookup(a, name)
+        table_b = lookup(b, name)
         if table_a is None or table_b is None:
             # A section present on only one side is already reported by
             # _diff_sections as an added or removed section.
             continue
 
-        entity = _SETTINGS_ENTITY[name]
         table_cls = type(table_a)
         # Grouped by what one index *means*, which each table declares, rather
         # than by array length. Length cannot tell the cases apart: UPGx's pad
@@ -518,10 +535,10 @@ def _diff_settings(report: DiffReport, a: Chk, b: Chk,
         # section that models no weapons at all.
         groups: dict[tuple[str, int], list[str]] = {}
         for field_name, _code, count in table_cls.LAYOUT:
-            label = table_cls.INDEXED_BY.get(field_name, entity)
+            label = table_cls.INDEXED_BY.get(field_name, table_cls.ENTITY)
             groups.setdefault((label, count), []).append(field_name)
 
-        for (label, count), fields in groups.items():
+        for (_label, count), fields in groups.items():
             for index in range(count):
                 changed = [
                     (f, table_a[f][index], table_b[f][index])
@@ -530,7 +547,7 @@ def _diff_settings(report: DiffReport, a: Chk, b: Chk,
                 ]
                 if not changed:
                     continue
-                key = f"{label} {index}" if count > 1 else label
+                key = table_cls.index_label(fields[0], index)
                 if isinstance(table_a, (SoundPaths, SwitchNames)):
                     _, before_id, after_id = changed[0]
                     report.add(
@@ -552,6 +569,52 @@ def _diff_settings(report: DiffReport, a: Chk, b: Chk,
             )
 
 
+#: Sections some function above compares field by field. Anything typed but
+#: absent from this set falls through to _diff_opaque, so no byte change is
+#: silently invisible. ``test_diff`` asserts the two sets together cover
+#: TYPED_SECTIONS, which is what keeps this list from rotting as sections are
+#: added.
+_SEMANTICALLY_DIFFED = frozenset({
+    "VER", "ERA", "DIM", "SPRP",
+    "OWNR", "IOWN", "SIDE", "FORC",
+    "STR", "STRx",
+    "MRGN", "UNIT", "THG2", "TRIG", "MBRF",
+    "UNIS", "UNIx", "UPGS", "UPGx", "TECS", "TECx", "WAV", "SWNM",
+    "PUNI", "UPGR", "PUPx", "PTEC", "PTEx",
+})
+
+
+def _diff_opaque(report: DiffReport, a: Chk, b: Chk) -> None:
+    """Report a content change in a typed section nothing above compares.
+
+    ``_diff_sections`` notices names, order and sizes, and a great many edits
+    change none of the three. A terrain edit is the clearest case: repainting a
+    tile rewrites ``MTXM`` in place, so before this the whole map diffed as no
+    differences at all. The same held for a moved doodad, a swapped player
+    colour and a replaced ``VCOD``.
+
+    These are reported by digest and a differing-byte count rather than decoded.
+    That is deliberately weaker than the comparisons above -- it says something
+    changed and how much, not what -- but a weak true report beats a confident
+    empty one.
+    """
+    for name in sorted(set(TYPED_SECTIONS) - _SEMANTICALLY_DIFFED):
+        section_a, section_b = a.last(name), b.last(name)
+        if section_a is None or section_b is None:
+            # Present on one side only: already an added or removed section.
+            continue
+        before, after = bytes(section_a.data), bytes(section_b.data)
+        if before == after:
+            continue
+        differing = sum(1 for x, y in zip(before, after, strict=False) if x != y)
+        differing += abs(len(before) - len(after))
+        report.add(
+            name, "changed", "content",
+            before=_tail(before), after=_tail(after),
+            detail=f"{differing} of {max(len(before), len(after))} bytes differ",
+        )
+
+
 def diff(a: Chk, b: Chk) -> DiffReport:
     """Compare two scenarios semantically."""
     report = DiffReport()
@@ -567,6 +630,7 @@ def diff(a: Chk, b: Chk) -> DiffReport:
     _diff_units(report, a, b, "THG2", _sprite_describe, _sprite_key)
     _diff_triggers(report, a, b, "TRIG", sa, sb)
     _diff_triggers(report, a, b, "MBRF", sa, sb)
-    _diff_settings(report, a, b, sa, sb)
+    _diff_tables(report, a, b, sa, sb)
+    _diff_opaque(report, a, b)
     _diff_sections(report, a, b)
     return report

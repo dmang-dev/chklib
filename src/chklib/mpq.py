@@ -38,10 +38,12 @@ See ``tests/test_mpq.py``.
 from __future__ import annotations
 
 import bz2
+import os
 import struct
 import zlib
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Any
 
 from .pkware import explode
 
@@ -263,7 +265,7 @@ class MpqArchive:
     # -- construction ------------------------------------------------------
 
     @classmethod
-    def from_path(cls, path) -> "MpqArchive":
+    def from_path(cls, path: str | os.PathLike[str]) -> MpqArchive:
         with open(path, "rb") as handle:
             return cls(handle.read())
 
@@ -279,7 +281,8 @@ class MpqArchive:
                 # A user-data header carries the offset of the real one:
                 # magic, userDataSize, mpqHeaderOffset, userDataHeaderSize.
                 _, _, header_offset, _ = struct.unpack_from("<4sIII", raw, offset)
-                return offset + header_offset
+                start: int = offset + header_offset
+                return start
         raise MpqError("no MPQ header found")
 
     def _table(self, offset: int, count: int, entry_size: int,
@@ -582,7 +585,9 @@ class MpqWriter:
             + _encrypt(block_table, _hash("(block table)", _HASH_FILE_KEY))
         )
 
-    def _build_hash_table(self, files, hash_size: int) -> bytes:
+    def _build_hash_table(
+        self, files: Sequence[tuple[str, bytes, int]], hash_size: int
+    ) -> bytes:
         table = bytearray(self._EMPTY_HASH_ENTRY * hash_size)
         for block_index, (name, _, _) in enumerate(files):
             slot = _hash(name, _HASH_TABLE_OFFSET) % hash_size
@@ -604,7 +609,7 @@ class MpqWriter:
         return bytes(table)
 
 
-def write_scenario(chk: bytes, *, compress: bool = False, **kwargs) -> bytes:
+def write_scenario(chk: bytes, *, compress: bool = False, **kwargs: Any) -> bytes:
     """Build a map archive containing ``chk`` as ``staredit\\scenario.chk``."""
     writer = MpqWriter(**kwargs)
     writer.add(SCENARIO_PATH, chk, compress=compress)

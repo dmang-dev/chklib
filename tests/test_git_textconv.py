@@ -20,9 +20,9 @@ import subprocess
 import sys
 
 import pytest
+from conftest import installed_maps
 
 from chklib.cli import main
-from conftest import installed_maps
 
 MAPS = installed_maps()
 
@@ -41,7 +41,10 @@ def _git() -> str | None:
         if pathlib.Path(candidate).is_file():
             return candidate
     found = shutil.which("git")
-    return found if found and "devkitpro" not in found.lower() else found
+    # None rather than `found`: a git resolved out of the devkitPro tree is
+    # exactly the shadowing case above, and these tests skip rather than
+    # run against it.
+    return found if found and "devkitpro" not in found.lower() else None
 
 
 GIT = _git()

@@ -87,19 +87,25 @@ for trigger in view_for(chk, "TRIG"):             # 2400-byte records
         ActionType(action.action_type)            # CreateUnitWithProperties, ...
 ```
 
-Covered — 27 sections:
+Covered — **all 41 sections**:
 
 ```
 DIM VER ERA OWNR IOWN SIDE SPRP FORC          map and players
-UNIT THG2 MRGN                                objects and locations
+TYPE IVER IVE2 VCOD                           versions and validation
+UNIT THG2 MRGN DD2                            objects, locations, doodads
 MTXM TILE MASK ISOM                           terrain
 STR STRx                                      strings
-TRIG MBRF                                     triggers and briefings
+TRIG MBRF UPRP UPUS                           triggers, briefings, unit properties
 WAV SWNM UNIS UNIx UPGS UPGx TECS TECx        settings
+PUNI UPGR PUPx PTEC PTEx                      player restrictions
+COLR CRGB                                     colours
 ```
 
-What remains untyped — `TYPE IVER IVE2 VCOD PUNI UPGR PTEC PUPx PTEx DD2 UPRP UPUS COLR
-CRGB` — is reachable as raw bytes through the container and round-trips untouched.
+Nothing documented is left as opaque bytes. Verified rather than asserted: across the 488
+maps this suite runs against, `view_for` builds **16,505 views over all 41 section kinds
+with zero round-trip mismatches and zero failures**. The only section names left unclaimed
+are deliberate forgeries — protected maps ship `TlLE`, `PUNl`, `FORc` and `SlDE`, which
+swap a lowercase `l` for an `I` to mislead editors that match loosely.
 
 Three behaviours worth knowing, each of which a naive implementation gets wrong:
 
@@ -169,6 +175,86 @@ Measured across the 423 installed maps, and recorded as tests rather than assume
   here. If that ever stops being true, precedence starts to matter.
 - Duplicate settings sections are real — one map ships two `WAV` sections. They resolve
   last-wins: only `MTXM` takes the prefix-patch merge the terrain grids use.
+
+## Player restriction tables
+
+Where the settings tables say what a unit *is*, `PUNI`, `UPGR`/`PUPx` and `PTEC`/`PTEx`
+say what each player may *do* with it.
+
+```python
+from chklib import restrictions_for
+
+puni = restrictions_for(chk, "PUNI")
+puni.buildable(player=3, unit=45)        # follows the uses-default flag
+puni.customised_units()                  # units some player restricts
+
+upgr = restrictions_for(chk, "UPGR")
+upgr.max_level(player=0, upgrade=0)      # 3
+```
+
+**Every one of these is player-major, with twelve players.** `player_unit_buildable` is
+`u8[12][228]` flattened row by row, so player 3's entry for unit 45 is at `3 * 228 + 45`.
+Index it the other way and you read a real value belonging to a different player — use
+`.at()` and `.set_at()` rather than doing the arithmetic. Twelve, not eight: `COLR` and
+`FORC` have eight playable slots, these follow `OWNR`.
+
+**The unset value is 1 for most of these arrays.** As with `useDefault`, the flags are
+constructed *set*, and `PUNI` additionally starts with everything buildable. Zero-filling
+a short section asserts that nothing is available and nothing uses defaults — the exact
+opposite of an untouched map.
+
+**Reading the per-player array alone reports a value the game ignores.** A player whose
+`uses_default` flag is set follows the global row instead. The accessors above apply that
+rule; the raw arrays are still there when you want what is literally on disk.
+
+### What is settled and what is not
+
+The *layout* is as well attested as anything here: openbw reads all five independently of
+Chkdraft, llvm-bw's map of `StarCraft.exe` pins the counts 61 and 44 a third time, and the
+corpus agrees exactly — all 488 `PUNI`, 328 `UPGR`, 391 `PUPx`, 328 `PTEC` and 391 `PTEx`
+sections are *precisely* nominal size, with not one short or oversized.
+
+The *default tables* are weaker, and are labelled that way rather than presented as
+constants. Only Chkdraft states them. Measured against real maps they are a common map's
+contents, not a universal truth:
+
+| table | maps matching Chkdraft |
+|---|---|
+| `UPGR.default_max_level` | 200 of 328 — 98 differ only at index 18 |
+| `PUPx.default_max_level` | 230 of 391 |
+| `PTEC.tech_researched_by_default` | **39 of 328** — 258 zero all six entries |
+| `PTEx.tech_researched_by_default` | 100 of 391 |
+
+Both readings are legitimate; a map saying "no technology starts researched" is making a
+choice. Chkdraft's values are kept for synthesising a section from nothing, because they
+are traceable to a cited source — and since no section in the corpus is short, that is the
+only time they are ever used.
+
+## Trigger unit properties, doodads and the rest
+
+`UPRP` holds 64 twenty-byte property slots that `CreateUnitWithProperties` actions index
+into; without it such an action can be named but not explained. `UPUS` says which slots
+are real — seven corpus maps declare it zero-length, which reads as "none in use".
+
+`DD2` is editor-only doodads, 8 bytes each. **Its `enabled` byte is inverted**: `0` means
+enabled, so `bool(enabled)` is exactly backwards and a doodad written with `1` is silently
+switched off. Use `Doodad.is_enabled`. Seven corpus maps carry a 60-byte `DD2` — seven
+whole doodads and half of an eighth — so the trailing partial record is preserved rather
+than dropped or padded out.
+
+`COLR` is eight colour bytes. **They are not validated against a named colour**: the
+corpus carries 14 and 15, and a Remastered map can go higher, so anything rejecting an
+unnamed value would refuse real maps.
+
+`CRGB` is the least corroborated section in this library and says so in its docstring.
+Only Chkdraft describes it, and unusually does not annotate its size the way it does every
+neighbour. Exactly one map of 488 carries one; it is 32 bytes with eight uniform setting
+bytes, which is what the 24/8 split predicts.
+
+`VCOD` is the 1040-byte checksum seed table. It is very nearly a constant — 483 of 488
+maps hold byte-identical payloads — so `is_standard` lets `pack` *check* it rather than
+copy it blindly. The five that differ are the interesting ones: a non-standard `VCOD` is
+how a map is made to refuse to open in an editor that recomputes it.
 
 ## `chkdiff inspect`
 

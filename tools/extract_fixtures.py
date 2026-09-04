@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         name = pathlib.Path(path).stem + ".chk"
         try:
             data = extract_one(mpqapi, path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one bad map must not stop the run
             print(f"  FAIL {name}: {type(exc).__name__}: {exc}", file=sys.stderr)
             failed += 1
             continue

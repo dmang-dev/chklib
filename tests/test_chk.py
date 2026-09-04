@@ -8,6 +8,7 @@ bytes -- and to prove malformed input is described rather than rejected.
 
 from __future__ import annotations
 
+import dataclasses
 import random
 import struct
 
@@ -189,7 +190,7 @@ def test_section_offset_points_at_its_header() -> None:
 
 def test_sections_are_immutable() -> None:
     chk = Chk.from_bytes(sec(b"VER ", b"1"))
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         chk.sections[0].data = b"nope"
 
 

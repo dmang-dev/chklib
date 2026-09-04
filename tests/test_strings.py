@@ -23,10 +23,10 @@ import pathlib
 import struct
 
 import pytest
+from conftest import installed_maps
 
 from chklib import Chk, StringTable
 from chklib.views import StringTableView, string_table_for, view_for
-from conftest import installed_maps
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -384,7 +384,7 @@ _INSTALLED = installed_maps()
 
 
 def _strx_maps() -> list[bytes]:
-    from chklib.mpq import MpqArchive, SCENARIO_PATH
+    from chklib.mpq import SCENARIO_PATH, MpqArchive
 
     out = []
     for path in _INSTALLED:

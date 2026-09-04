@@ -15,12 +15,12 @@ Fixtures are gitignored; run ``tools/extract_fixtures.py`` first or these skip.
 
 from __future__ import annotations
 
+import itertools
 import pathlib
 
 import pytest
 
 from chklib import Chk
-from chklib.records import Location, Sprite, Trigger, Unit
 from chklib.views import TYPED_SECTIONS, StringTableView, view_for
 
 CORPUS = pathlib.Path(__file__).parent / "fixtures" / "corpus"
@@ -69,6 +69,15 @@ NOT_IN_THIS_CORPUS = {
     # STRx is covered instead by tests/test_strings.py against installed
     # Remastered maps, 24 of which use it.
     "STRx",
+    # Same reason, one version lower: Chkdraft omits COLR below Hybrid and
+    # removes it when downgrading, so a VER 59/63 scenario has none. Covered
+    # instead by test_restrictions.py against installed maps, 196 of which
+    # carry one.
+    "COLR",
+    # Remastered-only, and vanishingly rare even there: exactly one map of the
+    # 488 this suite can reach has a CRGB. Covered by that map in
+    # test_restrictions.py, and by a unit test for the 24/8 split.
+    "CRGB",
 }
 
 
@@ -210,7 +219,7 @@ def test_string_data_is_not_in_ascending_id_order_in_many_maps() -> None:
             for i in range(1, strings.count + 1)
             if strings.get(i)
         ]
-        if any(b[1] < a[1] for a, b in zip(present, present[1:])):
+        if any(b[1] < a[1] for a, b in itertools.pairwise(present)):
             inverted_maps += 1
     assert inverted_maps > 0, "expected out-of-order string data in this corpus"
 

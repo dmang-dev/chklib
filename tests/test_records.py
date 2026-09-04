@@ -39,7 +39,7 @@ FLAT_RECORDS = [Unit, Sprite, Location, Condition, Action]
     ids=lambda v: getattr(v, "__name__", v),
 )
 def test_record_size(cls, size) -> None:
-    assert cls.SIZE == size
+    assert size == cls.SIZE
     assert cls._STRUCT.size == size
 
 

@@ -22,9 +22,8 @@ import pytest
 from chklib import Chk
 from chklib.cli import main
 from chklib.diff import JSON_SCHEMA_VERSION, diff
-from chklib.records import Action, Condition, Location, Trigger, Unit
+from chklib.records import Location, Trigger, Unit
 from chklib.settings import UnitSettings, UpgradeSettingsExpansion
-from chklib.views import view_for
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -43,12 +42,12 @@ def string_table(values: list[bytes]) -> bytes:
 
 
 def a_unit(**kw) -> Unit:
-    defaults = dict(
-        class_id=0, xc=100, yc=200, type=7, relation_flags=0, valid_state_flags=0,
-        valid_field_flags=0x02, owner=0, hitpoint_percent=100, shield_percent=100,
-        energy_percent=100, resource_amount=0, hangar_amount=0, state_flags=0,
-        unused=0, relation_class_id=0,
-    )
+    defaults = {
+        "class_id": 0, "xc": 100, "yc": 200, "type": 7, "relation_flags": 0, "valid_state_flags": 0,
+        "valid_field_flags": 0x02, "owner": 0, "hitpoint_percent": 100, "shield_percent": 100,
+        "energy_percent": 100, "resource_amount": 0, "hangar_amount": 0, "state_flags": 0,
+        "unused": 0, "relation_class_id": 0,
+    }
     defaults.update(kw)
     return Unit(**defaults)
 
@@ -233,7 +232,7 @@ def test_inserting_a_trigger_at_the_top_does_not_cascade() -> None:
     alignment over content hashes reports exactly one addition.
     """
     original = [a_trigger(location=i) for i in range(1, 21)]
-    inserted = [a_trigger(location=99)] + original
+    inserted = [a_trigger(location=99), *original]
     report = diff(build(triggers=original), build(triggers=inserted))
     trigger_changes = [c for c in report.changes if c.area == "TRIG"]
     assert len(trigger_changes) == 1, [c.to_text() for c in trigger_changes]
@@ -264,7 +263,7 @@ def test_editing_one_action_reports_only_that_line() -> None:
 def test_insert_plus_edit_reports_the_index_shift() -> None:
     """An edited trigger that also moved is reported as ``trigger a->b``."""
     original = [a_trigger(location=i) for i in range(1, 11)]
-    edited = [a_trigger(location=500)] + copy.deepcopy(original)
+    edited = [a_trigger(location=500), *copy.deepcopy(original)]
     edited[6].actions[0] = replace(edited[6].actions[0], location_id=888)
     report = diff(build(triggers=original), build(triggers=edited))
     trigger_changes = [c for c in report.changes if c.area == "TRIG"]
@@ -470,3 +469,38 @@ def test_changed_trailing_bytes_render_differently() -> None:
     change = next(c for c in report.changes if c.key == "trailing bytes")
     assert change.before != change.after
     assert change.before.startswith("1 bytes sha=")
+
+
+def test_every_typed_section_is_either_diffed_or_falls_through() -> None:
+    """Nothing typed may be invisible to ``diff``.
+
+    ``_diff_sections`` compares names, order and sizes only, so a section that
+    is neither compared field by field nor caught by ``_diff_opaque`` changes
+    silently. That is what used to happen to terrain: repainting a tile rewrites
+    MTXM in place, and the whole map diffed as no differences at all.
+    """
+    from chklib.diff import _SEMANTICALLY_DIFFED
+    from chklib.views import TYPED_SECTIONS
+
+    assert set(TYPED_SECTIONS) >= _SEMANTICALLY_DIFFED, (
+        "a section is listed as diffed but is not typed: "
+        f"{_SEMANTICALLY_DIFFED - set(TYPED_SECTIONS)}"
+    )
+    # The fallback covers the rest by construction, so together they are total.
+    assert set(TYPED_SECTIONS) - _SEMANTICALLY_DIFFED, "the fallback covers nothing"
+
+
+def test_a_terrain_edit_is_reported() -> None:
+    """It was not, before ``_diff_opaque``: a tile change alters no size."""
+    def grid(tile: int) -> Chk:
+        return Chk.from_bytes(
+            sect(b"VER ", struct.pack("<H", 59))
+            + sect(b"DIM ", struct.pack("<HH", 2, 2))
+            + sect(b"MTXM", struct.pack("<4H", tile, 1, 2, 3))
+        )
+
+    report = diff(grid(0), grid(99))
+    changes = [c for c in report.changes if c.area == "MTXM"]
+    assert changes, "a repainted tile must not diff as no differences"
+    assert changes[0].key == "content"
+    assert "1 of 8 bytes differ" in changes[0].detail

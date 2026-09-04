@@ -116,7 +116,7 @@ _DISTANCE_CODE = _Huffman(_DISTANCE_LENGTHS, 64)
 class _BitReader:
     """LSB-first bit reader over a byte string."""
 
-    __slots__ = ("_data", "_pos", "_bit_buffer", "_bit_count")
+    __slots__ = ("_bit_buffer", "_bit_count", "_data", "_pos")
 
     def __init__(self, data: bytes, start: int) -> None:
         self._data = data

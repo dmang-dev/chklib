@@ -22,9 +22,10 @@ import pathlib
 import struct
 
 import pytest
+from conftest import installed_maps
 
 from chklib import Chk
-from chklib.mpq import MpqArchive, SCENARIO_PATH
+from chklib.mpq import SCENARIO_PATH, MpqArchive
 from chklib.settings import (
     USE_DEFAULT_NO,
     USE_DEFAULT_YES,
@@ -40,7 +41,6 @@ from chklib.settings import (
     settings_for,
 )
 from chklib.views import string_table_for
-from conftest import installed_maps
 
 ALL_TABLES = (
     SoundPaths, SwitchNames,
@@ -466,7 +466,7 @@ def test_every_settings_section_repacks_to_its_original_bytes() -> None:
     Comparing ``to_bytes()`` without it compares a section's bytes to
     themselves, because an unmodified table short-circuits to ``raw``.
     """
-    seen = {name: 0 for name in SECTION_NAMES}
+    seen = dict.fromkeys(SECTION_NAMES, 0)
     problems: list[str] = []
     for map_name, chk in _real_chks(list(CORPUS) + list(INSTALLED)):
         for name in SECTION_NAMES:

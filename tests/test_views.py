@@ -14,7 +14,7 @@ import struct
 import pytest
 
 from chklib import Chk, Section
-from chklib.records import Location, Sprite, Trigger, Unit
+from chklib.records import Location, Trigger, Unit
 from chklib.views import (
     Dimensions,
     PlayerRaces,

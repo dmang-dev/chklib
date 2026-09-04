@@ -17,9 +17,9 @@ from .chk import Chk
 from .diff import diff
 from .inspect import FORMAT_VERSION, render
 from .mpq import (
+    SCENARIO_PATH,
     MpqArchive,
     MpqError,
-    SCENARIO_PATH,
     looks_like_mpq,
     write_scenario,
 )
@@ -289,7 +289,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return args.func(args)
+        # argparse hands back an untyped namespace, so the dispatch target
+        # is Any; every set_defaults(func=...) below returns an exit code.
+        exit_code: int = args.func(args)
+        return exit_code
     except BrokenPipeError:
         # A downstream consumer closed the pipe -- `chkdiff diff x y | head` is
         # completely normal usage. Python would otherwise flush stdout again at

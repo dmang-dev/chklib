@@ -20,10 +20,10 @@ import pathlib
 import struct
 
 import pytest
+from conftest import installed_maps
 
 from chklib import Chk
 from chklib.views import FogGrid, TileGrid, terrain_for, view_for
-from conftest import installed_maps
 
 
 def sect(name: bytes, payload: bytes) -> bytes:
@@ -269,7 +269,10 @@ def test_mtxm_and_tile_genuinely_differ_in_real_maps() -> None:
         if game.cells == editor.cells:
             identical += 1
         else:
-            differing = sum(a != b for a, b in zip(game.cells, editor.cells))
+            # A short section leaves one grid smaller; comparing the common
+            # prefix is the intent, so this pairing is deliberately lax.
+            differing = sum(a != b for a, b in zip(game.cells, editor.cells,
+                                                   strict=False))
             worst = max(worst, differing / len(game.cells))
     assert identical <= 1, f"{identical} maps have identical layers; expected at most 1"
     assert worst > 0.05, f"worst divergence only {worst:.2%}"
@@ -442,7 +445,7 @@ INSTALLED = installed_maps()
 
 
 def _installed_chks():
-    from chklib.mpq import MpqArchive, SCENARIO_PATH
+    from chklib.mpq import SCENARIO_PATH, MpqArchive
 
     for path in INSTALLED:
         try:
