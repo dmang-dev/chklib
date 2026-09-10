@@ -19,7 +19,6 @@ import pathlib
 import struct
 
 import pytest
-import tomllib
 from conftest import installed_maps
 
 from chklib import Chk
@@ -498,7 +497,16 @@ def test_every_documented_section_is_typed() -> None:
 
 def test_the_package_version_matches_its_metadata() -> None:
     """``__version__`` and pyproject drift silently otherwise, and a release
-    picks up whichever the build backend happens to read."""
+    picks up whichever the build backend happens to read.
+
+    ``tomllib`` is stdlib only from 3.11, and this package supports 3.10. The
+    import is skipped rather than hoisted to the top of the module, because at
+    module level it fails *collection* -- taking all 80 tests in this file down
+    on 3.10 rather than the one that needs a TOML parser. The invariant is a
+    property of the repository, so checking it on one interpreter is enough.
+    """
+    tomllib = pytest.importorskip("tomllib", reason="stdlib only from 3.11")
+
     import chklib
 
     root = pathlib.Path(__file__).resolve().parent.parent
