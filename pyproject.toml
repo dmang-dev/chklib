@@ -58,9 +58,15 @@ packages = ["src/chklib"]
 
 [tool.hatch.build.targets.sdist]
 # Ship the tests and the fixture tool so the suite is runnable from an sdist.
-# The map corpora themselves are never included: they are copyrighted, read from
-# the user's own installation, and gitignored.
 include = ["src/", "tests/", "tools/", "docs/", "README.md", "LICENSE", "pyproject.toml"]
+# The map corpora are never shipped: they are copyrighted and read from the
+# user's own installation. They are gitignored too, but that alone is not a
+# packaging rule -- hatchling honours .gitignore only by default, and `tests/`
+# above is included wholesale, so a build from a tree without the ignore file
+# (an export, an unpacked sdist, a different backend) would ship all 65 maps.
+# Saying it here makes the exclusion a property of the package, not of the
+# checkout it happens to be built from.
+exclude = ["tests/fixtures/", "*.chk", "*.scm", "*.scx", "*.mpq"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

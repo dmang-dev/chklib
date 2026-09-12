@@ -24,8 +24,8 @@ Everything that can read a StarCraft map today is one of three things:
 There is no library anywhere that reads *and* writes a CHK losslessly with a typed
 trigger model. That is the gap this fills.
 
-See [docs/first-consumer-scope.md](docs/first-consumer-scope.md) for the scope and the
-acceptance gate, and [docs/contribution-targets.md](docs/contribution-targets.md) for a
+See [docs/first-consumer-scope.md](https://github.com/dmang-dev/chklib/blob/main/docs/first-consumer-scope.md) for the scope and the
+acceptance gate, and [docs/contribution-targets.md](https://github.com/dmang-dev/chklib/blob/main/docs/contribution-targets.md) for a
 survey of the surrounding ecosystem.
 
 ## The container
@@ -638,7 +638,7 @@ avoid. A file format's four-character code carries no such baggage.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/dmang-dev/chklib/blob/main/LICENSE).
 
 StarCraft is a trademark of Blizzard Entertainment, Inc. This project is not
 affiliated with or endorsed by Blizzard Entertainment, and redistributes none of
