@@ -71,6 +71,12 @@ jobs:
   publish:
     name: publish to PyPI
     needs: build
+    # Only a published release publishes. A manual dispatch runs lint, the test
+    # matrix and the build, and stops there: the pypi environment accepts
+    # deployments only from v* tags, so without this gate every dispatch from
+    # main ended red on a job that was never going to run - noise that would
+    # hide a real failure. Skipped, the run finishes green.
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
