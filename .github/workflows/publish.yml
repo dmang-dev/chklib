@@ -15,8 +15,8 @@ jobs:
     name: lint and type-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           # The lowest version the package supports, so mypy resolves the same
           # stdlib signatures a 3.10 user gets rather than a newer one's.
@@ -37,8 +37,8 @@ jobs:
         # Every version the package claims in its classifiers.
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip
@@ -54,8 +54,8 @@ jobs:
     needs: [lint, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade build twine
@@ -63,7 +63,7 @@ jobs:
       # Catches a README that will not render on PyPI, which cannot be fixed
       # after upload because a version number can never be reused.
       - run: python -m twine check dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: distributions
           path: dist/
@@ -84,7 +84,7 @@ jobs:
       # instead of using a stored API token.
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: distributions
           path: dist/
