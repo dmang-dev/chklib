@@ -91,4 +91,4 @@ __all__ = [
     "settings_for", "string_table_for", "view_for",
     "TYPED_SECTIONS",
 ]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
