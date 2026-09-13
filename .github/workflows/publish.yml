@@ -89,3 +89,43 @@ jobs:
           name: distributions
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  verify-artifact:
+    name: verify artifact download
+    needs: build
+    # A dispatch exercises lint, the test matrix and the build, but not the
+    # download publish depends on, because publish runs only for a release -
+    # and a release now uploads with no approval step in between. This job runs
+    # that same download, with the same action, name and path, on dispatches
+    # only, so a broken download step shows up here rather than on a release.
+    # It publishes nothing, needs no environment and no extra permissions.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist/
+      - name: check the downloaded distributions
+        run: |
+          set -euo pipefail
+          # Without nullglob an empty directory would count as one match.
+          shopt -s nullglob
+          ls -l dist/
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          if [ "${#wheels[@]}" -ne 1 ] || [ "${#sdists[@]}" -ne 1 ]; then
+            echo "::error::expected one wheel and one sdist, found ${#wheels[@]} and ${#sdists[@]}"
+            exit 1
+          fi
+          wheel_version=$(basename "${wheels[0]}" | cut -d- -f2)
+          sdist_version=$(basename "${sdists[0]}" .tar.gz | cut -d- -f2)
+          if [ "$wheel_version" != "$sdist_version" ]; then
+            echo "::error::wheel is $wheel_version but sdist is $sdist_version"
+            exit 1
+          fi
+          # `python -m zipfile -t` reports a corrupt member but still exits 0,
+          # so the check is spelled out to make corruption fail the job.
+          python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); bad = z.testzip(); sys.exit(f"corrupt member: {bad}" if bad else ("no chklib/__init__.py in the wheel" if "chklib/__init__.py" not in z.namelist() else 0))' "${wheels[0]}"
+          tar -tzf "${sdists[0]}" > /dev/null
+          echo "downloaded and intact: ${wheels[0]} and ${sdists[0]} (version $wheel_version)"
