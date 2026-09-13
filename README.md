@@ -318,6 +318,7 @@ whatever notion of identity it actually has:
 | Identity by index | strings, locations | position by position — ids are referenced from elsewhere in the map |
 | No identity | units, sprites | multiset, then pair leftovers by `(owner, type)` so a move reads as a change |
 | Content **and** position | triggers | LCS alignment over content hashes |
+| Map coordinate | terrain: `MTXM` `TILE` `MASK` | tile by tile on the `DIM` grid, duplicate `MTXM` merged as the game does |
 
 Triggers are the hard case: no ids, but their order *is* execution order, so they can't
 be treated as a set either. A positional comparison reports every later trigger as
@@ -339,6 +340,31 @@ a later one, and you get:
 The `6->7` records that the trigger both moved and changed. It degrades gracefully: below
 the similarity threshold a replacement is reported as an add plus a remove, which is
 correct, just less informative.
+
+Terrain is compared tile by tile, by map coordinate. Repainting a tile rewrites the grid in
+place and changes no section's size, so without this a terrain edit would show up only as
+"some bytes changed". Between two real versions of the same map:
+
+```
+~ MTXM  tiles  9 of 16384 tiles changed in (0,126)-(4,127)
+    - 32768 bytes sha=6c9e1b5c
+    + 32768 bytes sha=ed82a79d
+~ MTXM  tile (0,126)
+    - 0x5ef0 (group 1519 #0)
+    + 0x1942 (group 404 #2)
+```
+
+Each layer gets one summary with the count and bounding box, then up to 32 individual
+tiles. The cap is measured, not guessed: successive versions of the same map in the corpus
+differ by 9 to 85 tiles, so a real edit is shown in full or nearly so, while two unrelated
+maps of the same size — tens of thousands of changed cells — read as a summary. `MASK`
+cells name the players they fog.
+
+Where tiles can't be paired, the layer falls back to a digest and a differing-byte count
+rather than reporting nothing: no `DIM`, grids of different shapes, or bytes that changed
+without changing a tile the game reads (padding past the grid, or an earlier duplicate
+`MTXM` the merge overrides). `ISOM` stays on that digest comparison on purpose: it has its
+own coordinate system, its bit layout rests on one source, and the game never reads it.
 
 ## Editing
 

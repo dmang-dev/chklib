@@ -490,17 +490,149 @@ def test_every_typed_section_is_either_diffed_or_falls_through() -> None:
     assert set(TYPED_SECTIONS) - _SEMANTICALLY_DIFFED, "the fallback covers nothing"
 
 
-def test_a_terrain_edit_is_reported() -> None:
-    """It was not, before ``_diff_opaque``: a tile change alters no size."""
-    def grid(tile: int) -> Chk:
-        return Chk.from_bytes(
-            sect(b"VER ", struct.pack("<H", 59))
-            + sect(b"DIM ", struct.pack("<HH", 2, 2))
-            + sect(b"MTXM", struct.pack("<4H", tile, 1, 2, 3))
-        )
+def _terrain(width: int, height: int, *, mtxm: bytes | None = None,
+             mask: bytes | None = None, extra: bytes = b"", dim: bool = True) -> Chk:
+    """A minimal map: VER, optionally DIM, and whichever terrain layers are given."""
+    raw = sect(b"VER ", struct.pack("<H", 59))
+    if dim:
+        raw += sect(b"DIM ", struct.pack("<HH", width, height))
+    if mtxm is not None:
+        raw += sect(b"MTXM", mtxm)
+    if mask is not None:
+        raw += sect(b"MASK", mask)
+    return Chk.from_bytes(raw + extra)
 
-    report = diff(grid(0), grid(99))
-    changes = [c for c in report.changes if c.area == "MTXM"]
-    assert changes, "a repainted tile must not diff as no differences"
-    assert changes[0].key == "content"
-    assert "1 of 8 bytes differ" in changes[0].detail
+
+def _tiles(*values: int) -> bytes:
+    return struct.pack(f"<{len(values)}H", *values)
+
+
+def _terrain_changes(report, area: str = "MTXM"):
+    return [c for c in report.changes if c.area == area]
+
+
+def test_a_repainted_tile_is_reported_by_coordinate() -> None:
+    """Row-major, on a deliberately non-square map.
+
+    On a 4x2 map, cell 6 is (2,1). Reading the grid column-major -- the mistake
+    Chkdraft's own header comments invite -- would call the same cell (3,0), a
+    real and different tile, so a square map could not tell the two apart.
+    """
+    before = _terrain(4, 2, mtxm=_tiles(0, 1, 2, 3, 4, 5, 6, 7))
+    after = _terrain(4, 2, mtxm=_tiles(0, 1, 2, 3, 4, 5, 0x0123, 7))
+    changes = _terrain_changes(diff(before, after))
+
+    keys = [c.key for c in changes]
+    assert keys == ["tiles", "tile (2,1)"], keys
+    summary, tile = changes
+    assert summary.detail == "1 of 8 tiles changed in (2,1)-(2,1)"
+    assert tile.before == "0x0006 (group 0 #6)"
+    assert tile.after == "0x0123 (group 18 #3)"
+
+
+def test_many_changes_are_summarised_and_capped() -> None:
+    """A wholesale repaint reads as a count and a region, not a flood."""
+    from chklib.diff import TERRAIN_TILE_LIMIT
+
+    cells = list(range(64))
+    edited = [value + 1000 if index < 40 else value for index, value in enumerate(cells)]
+    report = diff(_terrain(16, 4, mtxm=_tiles(*cells)),
+                  _terrain(16, 4, mtxm=_tiles(*edited)))
+    changes = _terrain_changes(report)
+
+    summary = changes[0]
+    assert summary.key == "tiles"
+    assert summary.detail == (
+        f"40 of 64 tiles changed in (0,0)-(15,2); first {TERRAIN_TILE_LIMIT} listed"
+    )
+    listed = changes[1:]
+    assert len(listed) == TERRAIN_TILE_LIMIT == 32
+    assert listed[0].key == "tile (0,0)"
+    assert listed[-1].key == "tile (15,1)"  # index 31, still row-major
+
+
+def test_fog_changes_name_the_players() -> None:
+    """A set MASK bit means fogged, bit 0 being player 1."""
+    report = diff(_terrain(2, 1, mask=bytes([0x00, 0x00])),
+                  _terrain(2, 1, mask=bytes([0x05, 0x00])))
+    changes = _terrain_changes(report, "MASK")
+    tile = next(c for c in changes if c.key == "tile (0,0)")
+    assert tile.before == "0x00 fogged none"
+    assert tile.after == "0x05 fogged p1,p3"
+
+
+def test_identical_terrain_reports_nothing() -> None:
+    same = _terrain(4, 2, mtxm=_tiles(*range(8)), mask=bytes(8))
+    assert not [c for c in diff(same, same).changes if c.area in ("MTXM", "MASK")]
+
+
+def test_a_resized_grid_falls_back_to_the_digest() -> None:
+    """Different shapes cannot be paired tile by tile, but must not go silent."""
+    report = diff(_terrain(2, 2, mtxm=_tiles(1, 2, 3, 4)),
+                  _terrain(4, 1, mtxm=_tiles(1, 2, 3, 5)))
+    changes = _terrain_changes(report)
+    assert [c.key for c in changes] == ["content"]
+    assert "cannot be paired" in changes[0].detail
+
+
+def test_a_change_past_the_grid_is_still_reported() -> None:
+    """Bytes beyond width * height move no tile, and are still a change."""
+    report = diff(_terrain(2, 1, mtxm=_tiles(1, 2) + b"\x00\x00"),
+                  _terrain(2, 1, mtxm=_tiles(1, 2) + b"\xff\xff"))
+    changes = _terrain_changes(report)
+    assert [c.key for c in changes] == ["content"]
+    assert "no tile the game reads changed" in changes[0].detail
+
+
+def test_terrain_without_dim_is_still_reported() -> None:
+    report = diff(_terrain(0, 0, mtxm=_tiles(1, 2), dim=False),
+                  _terrain(0, 0, mtxm=_tiles(1, 3), dim=False))
+    changes = _terrain_changes(report)
+    assert [c.key for c in changes] == ["content"]
+    assert "no DIM" in changes[0].detail
+
+
+def test_an_edit_to_an_overridden_duplicate_is_still_reported() -> None:
+    """Protected maps stack MTXM sections, and the last full-length one wins.
+
+    Editing an earlier duplicate changes the file without changing a tile the
+    game reads. Comparing only the effective grid would call that no difference.
+    """
+    shared_second = sect(b"MTXM", _tiles(5, 6))
+    before = _terrain(2, 1, mtxm=_tiles(1, 2), extra=shared_second)
+    after = _terrain(2, 1, mtxm=_tiles(9, 9), extra=shared_second)
+    changes = _terrain_changes(diff(before, after))
+    assert [c.key for c in changes] == ["content"]
+    assert "no tile the game reads changed" in changes[0].detail
+
+
+def test_a_real_map_edit_reports_exactly_that_tile() -> None:
+    """One tile repainted on a real, non-square corpus map, and nothing else."""
+    from chklib.views import terrain_for
+
+    corpus = sorted((pathlib.Path(__file__).parent / "fixtures" / "corpus").glob("*.chk"))
+    for path in corpus:
+        original = Chk.from_bytes(path.read_bytes())
+        grid = terrain_for(original, "MTXM")
+        if (grid is None or grid.width == grid.height or grid.is_short
+                or len(original.find("MTXM")) != 1
+                or len(original.last("MTXM").data) != grid.width * grid.height * 2):
+            continue
+        break
+    else:
+        pytest.skip("no single, full-length, non-square MTXM in the fixture corpus")
+
+    edited = Chk.from_bytes(original.to_bytes())
+    grid = terrain_for(edited, "MTXM")
+    x, y = grid.width - 1, grid.height // 2
+    old_value = grid.get(x, y)
+    grid.set(x, y, (old_value + 1) & 0xFFFF)
+    edited.replace_section("MTXM", grid.to_bytes())
+
+    report = diff(original, edited)
+    assert {c.area for c in report.changes} == {"MTXM"}, report.to_text()
+    keys = [c.key for c in report.changes]
+    assert keys == ["tiles", f"tile ({x},{y})"], keys
+    assert report.changes[0].detail.startswith(
+        f"1 of {grid.width * grid.height} tiles changed in ({x},{y})-({x},{y})"
+    )

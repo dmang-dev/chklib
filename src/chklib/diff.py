@@ -45,7 +45,14 @@ from .inspect import _action_line, _condition_line, _enum_name, _quote
 from .records import Location, Sprite, Trigger, Unit
 from .restrictions import restrictions_for
 from .settings import SoundPaths, SwitchNames, settings_for
-from .views import TYPED_SECTIONS, StringTableView, string_table_for, view_for
+from .views import (
+    TYPED_SECTIONS,
+    StringTableView,
+    TileGrid,
+    string_table_for,
+    terrain_for,
+    view_for,
+)
 
 __all__ = ["Change", "DiffReport", "diff", "JSON_SCHEMA_VERSION"]
 
@@ -569,6 +576,120 @@ def _diff_tables(report: DiffReport, a: Chk, b: Chk,
             )
 
 
+#: How many individual tile changes one terrain layer lists before summarising.
+#: Measured rather than guessed: across the corpus, successive versions of the
+#: same map differ by 9 to 85 tiles, so a real edit is shown whole or nearly so,
+#: while a wholesale replacement -- tens of thousands of cells, which is what two
+#: different maps of one size produce -- reads as a summary instead of a flood.
+TERRAIN_TILE_LIMIT = 32
+
+#: The layers compared cell by cell. ISOM is deliberately not among them: it has
+#: its own coordinate system, its bit layout rests on a single source, and the
+#: game never reads it, so it keeps the digest comparison.
+_TERRAIN_GRIDS = ("MTXM", "TILE", "MASK")
+
+
+def _content_change(report: DiffReport, name: str, before: bytes, after: bytes,
+                    *, note: str = "") -> None:
+    """Report that a section's bytes changed, without decoding them."""
+    differing = sum(1 for x, y in zip(before, after, strict=False) if x != y)
+    differing += abs(len(before) - len(after))
+    detail = f"{differing} of {max(len(before), len(after))} bytes differ"
+    if note:
+        detail += f"; {note}"
+    report.add(
+        name, "changed", "content",
+        before=_tail(before), after=_tail(after), detail=detail,
+    )
+
+
+def _tile_value(name: str, value: int) -> str:
+    """One cell as a reader wants it: a megatile reference, or who is fogged."""
+    if name == "MASK":
+        # A set bit means fogged for that player, bit 0 being player 1.
+        players = [f"p{p + 1}" for p in range(8) if value & (1 << p)]
+        return f"0x{value:02x} fogged {','.join(players) if players else 'none'}"
+    return (
+        f"0x{value:04x} (group {TileGrid.group(value)} #{TileGrid.group_index(value)})"
+    )
+
+
+def _diff_terrain(report: DiffReport, a: Chk, b: Chk) -> None:
+    """Compare the terrain layers tile by tile.
+
+    Repainting terrain rewrites a grid in place, so it changes neither a
+    section's name, order nor size. The digest comparison this replaces could
+    say that a layer changed and by how many bytes; this says *which tiles*,
+    by map coordinate, and what they became.
+
+    Cells are compared on the grid the game sees -- shaped by ``DIM``, with
+    duplicate ``MTXM`` sections merged -- not on raw bytes. Three cases cannot be
+    put in tile terms, and each falls back to a digest rather than going silent:
+    no ``DIM`` to lay the grid out, grids of different shapes whose tiles cannot
+    be paired, and bytes that changed without changing any tile the game reads.
+    """
+    for name in _TERRAIN_GRIDS:
+        sections_a, sections_b = a.find(name), b.find(name)
+        if not sections_a or not sections_b:
+            # Present on one side only: already an added or removed section.
+            continue
+        # Every duplicate, not just the last: an edit to an earlier section the
+        # merge overrides is still a change to the file.
+        bytes_a = b"".join(bytes(s.data) for s in sections_a)
+        bytes_b = b"".join(bytes(s.data) for s in sections_b)
+        if bytes_a == bytes_b:
+            continue
+
+        grid_a, grid_b = terrain_for(a, name), terrain_for(b, name)
+        if grid_a is None or grid_b is None:
+            _content_change(report, name, bytes_a, bytes_b,
+                            note="no DIM to lay the grid out")
+            continue
+        if (grid_a.width, grid_a.height) != (grid_b.width, grid_b.height):
+            _content_change(
+                report, name, bytes_a, bytes_b,
+                note=(f"grid is {grid_a.width}x{grid_a.height} vs "
+                      f"{grid_b.width}x{grid_b.height}, so tiles cannot be paired"),
+            )
+            continue
+
+        width = grid_a.width
+        changed = [
+            index
+            for index, (before, after) in enumerate(
+                zip(grid_a.cells, grid_b.cells, strict=True)
+            )
+            if before != after
+        ]
+        if not changed:
+            # The bytes moved without moving a tile: padding past the grid, an
+            # odd trailing byte, or an earlier duplicate that the merge overrides.
+            _content_change(report, name, bytes_a, bytes_b,
+                            note="no tile the game reads changed")
+            continue
+
+        # Row-major: index = y * width + x.
+        xs = [index % width for index in changed]
+        ys = [index // width for index in changed]
+        shown = changed[:TERRAIN_TILE_LIMIT]
+        detail = (
+            f"{len(changed)} of {len(grid_a.cells)} tiles changed in "
+            f"({min(xs)},{min(ys)})-({max(xs)},{max(ys)})"
+        )
+        if len(shown) < len(changed):
+            detail += f"; first {len(shown)} listed"
+        report.add(
+            name, "changed", "tiles",
+            before=_tail(bytes_a), after=_tail(bytes_b), detail=detail,
+        )
+        for index in shown:
+            report.add(
+                name, "changed", f"tile ({index % width},{index // width})",
+                before=_tile_value(name, grid_a.cells[index]),
+                after=_tile_value(name, grid_b.cells[index]),
+            )
+
+
 #: Sections some function above compares field by field. Anything typed but
 #: absent from this set falls through to _diff_opaque, so no byte change is
 #: silently invisible. ``test_diff`` asserts the two sets together cover
@@ -581,6 +702,7 @@ _SEMANTICALLY_DIFFED = frozenset({
     "MRGN", "UNIT", "THG2", "TRIG", "MBRF",
     "UNIS", "UNIx", "UPGS", "UPGx", "TECS", "TECx", "WAV", "SWNM",
     "PUNI", "UPGR", "PUPx", "PTEC", "PTEx",
+    "MTXM", "TILE", "MASK",
 })
 
 
@@ -604,15 +726,8 @@ def _diff_opaque(report: DiffReport, a: Chk, b: Chk) -> None:
             # Present on one side only: already an added or removed section.
             continue
         before, after = bytes(section_a.data), bytes(section_b.data)
-        if before == after:
-            continue
-        differing = sum(1 for x, y in zip(before, after, strict=False) if x != y)
-        differing += abs(len(before) - len(after))
-        report.add(
-            name, "changed", "content",
-            before=_tail(before), after=_tail(after),
-            detail=f"{differing} of {max(len(before), len(after))} bytes differ",
-        )
+        if before != after:
+            _content_change(report, name, before, after)
 
 
 def diff(a: Chk, b: Chk) -> DiffReport:
@@ -631,6 +746,7 @@ def diff(a: Chk, b: Chk) -> DiffReport:
     _diff_triggers(report, a, b, "TRIG", sa, sb)
     _diff_triggers(report, a, b, "MBRF", sa, sb)
     _diff_tables(report, a, b, sa, sb)
+    _diff_terrain(report, a, b)
     _diff_opaque(report, a, b)
     _diff_sections(report, a, b)
     return report
